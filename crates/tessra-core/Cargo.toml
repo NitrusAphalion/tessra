@@ -1,0 +1,18 @@
+[package]
+name = "tessra-core"
+description = "Tessra object model: canonical encoding, hashing, identifiers, signatures, objects, and the view trie"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_bytes.workspace = true
+ciborium.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true
+hex.workspace = true

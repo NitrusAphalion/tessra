@@ -1,0 +1,14 @@
+[package]
+name = "tessra-oplog"
+description = "Tessra operation log: views, effects, merge, verification, init, and undo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tessra-core = { path = "../tessra-core" }
+serde.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true

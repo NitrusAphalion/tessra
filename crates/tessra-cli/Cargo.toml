@@ -1,0 +1,18 @@
+[package]
+name = "tessra-cli"
+description = "The tessra command: the thirteen verbs, init, and the MCP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tessra"
+path = "src/main.rs"
+
+[dependencies]
+tessra-core = { path = "../tessra-core" }
+tessra-daemon = { path = "../tessra-daemon" }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }

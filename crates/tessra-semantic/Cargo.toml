@@ -1,0 +1,17 @@
+[package]
+name = "tessra-semantic"
+description = "Tessra semantic index: tree-sitter node extraction, history-aware node identity, body hashes, node-level merge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tessra-core = { path = "../tessra-core" }
+tree-sitter = "0.27"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+thiserror.workspace = true
