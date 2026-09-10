@@ -57,13 +57,33 @@ The bottleneck has moved from writing code to knowing what to trust, why it exis
 
 ## Quick start
 
-**Requirements:** Rust 1.80+ (stable) and git. On Windows, Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need. See [DEVELOPING.md](DEVELOPING.md) for toolchain details.
+### Install
+
+Prebuilt binaries for macOS, Linux, and Windows, on x86_64 and arm64, are attached to every [release](https://github.com/NitrusAphalion/tessra/releases). The installers put `tessra` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows) and add it to your `PATH`. Tessra needs `git` on the `PATH`.
+
+macOS and Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.sh | sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.ps1 | iex"
+```
+
+Every release also carries `.tar.xz` and `.zip` archives per platform, a `sha256.sum` file, and a source tarball.
+
+To build from source instead you need Rust 1.80+ (stable) and git. On Windows, Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need. See [DEVELOPING.md](DEVELOPING.md) for toolchain details.
 
 ```sh
 git clone https://github.com/NitrusAphalion/tessra
 cd tessra
 cargo install --path crates/tessra-cli
 ```
+
+### First steps
 
 Then, inside any git checkout:
 

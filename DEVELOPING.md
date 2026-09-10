@@ -111,3 +111,24 @@ tessra daemon --idle-minutes 30     # run it in the foreground yourself
 ```
 
 On Windows a detached child inherits every inheritable handle of its parent, including a pipe a caller is reading. The CLI marks its standard handles non-inheritable before spawning the daemon, or `tessra status | something` would block until the daemon exited.
+
+## Releasing
+
+Releases are built by [dist](https://axodotdev.github.io/cargo-dist) from `dist-workspace.toml`. `.github/workflows/release.yml` is generated from that file and is not edited by hand. Pushing a tag `vX.Y.Z` that matches `version` under `[workspace.package]` in `Cargo.toml` builds `tessra` for macOS, Linux, and Windows on x86_64 and arm64, and publishes a GitHub release carrying the archives, the shell and PowerShell installers, checksums, and a source tarball. A version with a pre-release suffix, such as `v0.2.0-beta.1`, is published as a pre-release, which `releases/latest` and the install one-liners in the README skip.
+
+```sh
+# bump version under [workspace.package] in Cargo.toml and commit, then
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pull requests run `dist plan` only. To preview a release locally, or after changing `dist-workspace.toml`, install dist and regenerate the workflow; CI refuses to run while the workflow is out of date:
+
+```sh
+cargo install cargo-dist --locked   # or the installer on the dist releases page
+dist plan                           # what a release of the current version contains
+dist generate                       # rewrite .github/workflows/release.yml
+dist build                          # this machine's archive, into target/distrib
+```
+
+The binaries are not code-signed. A build downloaded through a browser is blocked by Gatekeeper on macOS until the project signs and notarizes with an Apple developer account, and SmartScreen warns on Windows. The installers fetch from the command line, which on macOS does not set the quarantine attribute.
