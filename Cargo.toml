@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 repository = "https://github.com/NitrusAphalion/tessra"
 rust-version = "1.80"
 

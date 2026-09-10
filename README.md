@@ -17,7 +17,7 @@ Built for agents that write code around the clock, and for the humans who decide
 </p>
 
 <p align="center">
-<img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+<img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
 <img alt="Rust 1.80+" src="https://img.shields.io/badge/rust-1.80%2B-orange">
 <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-yellow">
 <img alt="Interface: CLI and MCP" src="https://img.shields.io/badge/interface-CLI%20%2B%20MCP-brightgreen">
@@ -209,4 +209,4 @@ cargo clippy --workspace --all-targets
 
 ## License
 
-Apache-2.0.
+MIT.
