@@ -1,4 +1,4 @@
-<h1 align="center"><img src="docs/logo.svg" alt="Tessra" height="88"></h1>
+<h1 align="center"><img src="docs/logo-mark.svg" alt="Tessra" width="120"></h1>
 
 <p align="center"><strong>The version control system for the era of AI.</strong></p>
 
