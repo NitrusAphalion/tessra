@@ -430,6 +430,7 @@ tessra revoke --name <agent>                  # an agent: sessions, unlanded cha
 | `verify_timeout_s` | Seconds a verifier may run before it is stopped and attested as timed out | `600` |
 | `snapshot_state` | Capture build state on every snapshot, as `snapshot --with-state` does once | `false` |
 | `state_paths` | Comma-separated directories captured as state | `target,data,.venv,node_modules` |
+| `risk_sensitive` | Comma-separated globs of paths whose changes raise a change's risk score | a built-in list of secret, key, and infrastructure paths |
 | `agent_runner` | Command a hook's `agent(…)` action starts, with `TESSRA_AGENT`, `TESSRA_INTENT`, `TESSRA_EVENT`, `TESSRA_REPO`, and `TESSRA_EXE` in its environment | unset |
 | `anomaly_throttle`, `anomaly_cooldown_s`, `anomaly_revoke` | Anomaly points at which an agent's mutations are refused, for how many seconds, and at which it is revoked and unwound | `3`, `60`, `6` |
 | `auto_revert` | Roll a target back when an observe clause trips | `true` |

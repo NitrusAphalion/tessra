@@ -4,7 +4,14 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A landing refused for a weakened test charges the change's author anomaly points once per revision, not on every frontier pass, so an owner's retries can no longer revoke an agent (#1).
+- A `forbid ... unless approved(human)` clause names its escape in the refusal and opens an approval request, as `require approved(human)` does (#2).
+- A landing carries the flags of the snapshot it lands, so `structural(flags.none)` refuses a flagged change at landing instead of only reporting it at `verify` (#3).
+- `risk_sensitive` accepts the comma-separated text `config --set` stores (#4).
+- The daemon writes its endpoint file atomically, and a client retries a timed-out connect with backoff, so a caller that polls for the endpoint never races it (#5).
+- Merging two changes that each inserted an item into the same module keeps the module's first item indented (#6).
 
 ## 0.1.1 - 2026-09-10
 
