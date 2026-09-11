@@ -10,15 +10,17 @@ Built for agents that write code around the clock, and for the humans who decide
 </p>
 
 <p align="center">
-<strong>Using Tessra</strong>&nbsp;
+<strong>Using Tessra</strong><br>
 <a href="#get-started">Get started</a> ·
 <a href="#why-tessra">Why Tessra</a> ·
 <a href="#how-it-works">How it works</a> ·
 <a href="#what-you-get">What you get</a> ·
 <a href="#how-agents-use-it">How agents use it</a> ·
 <a href="#standards-and-hooks">Standards and hooks</a>
-<br>
-<strong>Working on Tessra</strong>&nbsp;
+</p>
+
+<p align="center">
+<strong>Working on Tessra</strong><br>
 <a href="#architecture">Architecture</a> ·
 <a href="#status">Status</a> ·
 <a href="#design-documents">Design documents</a> ·
