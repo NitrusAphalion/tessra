@@ -49,23 +49,21 @@ Built for agents that write code around the clock, and for the humans who decide
 
 ## Why Tessra
 
-Put a few agents to work on one codebase and the same problems show up within a day. None of them is a model problem. They are what happens when tools built for one careful human at a time meet authors that are many, fast, and tireless.
+Your agents write code around the clock. Your version control still assumes one author, one branch, and a human reading every diff.
 
-**Agents block each other.** Two agents touching the same file collide in git's line-based merge, and whoever lands second inherits a rebase, conflict markers, and a retry. Teams end up partitioning work by file and serializing it through pull requests, which is exactly the coordination the agents were supposed to remove. *Tessra merges units, not lines.* Every agent works in a workspace of its own. Two agents editing different functions of one file never conflict, a rename in one change is carried into a concurrent change that still calls the old name, and a real collision becomes a task carrying both intents rather than an error that stops anyone.
+**Agents block each other.** Two agents in one file means conflict markers, a rebase, and a retry. Tessra merges functions, not lines. Agents editing different parts of the same file both land.
 
-**Reviews are the bottleneck.** Agents write faster than people can read, so the pull request queue grows, reviewers skim, and review becomes a formality that still takes days. *Tessra changes what humans review.* The owner writes a standard once, as data: tests pass, changed units are covered, no test was weakened, a person signs off above a risk level. Nothing lands until the standard is met, and people review the standard, the exceptions, and a sample, not every diff.
+**Reviews are the bottleneck.** Nobody reads as fast as agents write. Write the bar once, as a standard, and Tessra lands only what meets it. You review the standard and the exceptions, not every diff.
 
-**"The tests pass" is a claim, not a fact.** An agent that reports green has no way to prove it, and a CI result lives in another system with no tie to the exact content it checked. *Tessra runs the verifiers itself*, in a scratch copy with a stripped environment, and signs the result as an attestation bound to the content and the toolchain. An agent's own claim carries no weight, and the same content is never verified twice.
+**"The tests pass" is a claim.** Tessra runs the tests itself, in a clean scratch copy, and signs the result. An agent's word carries no weight. Proof does.
 
-**Every session starts from zero.** The gotcha found last week lives in a chat transcript, and the CLAUDE.md meant to carry it is stale the day it is written. *Tessra keeps memory in the repository*, scoped to the unit, path, or intent it is about, recalled by `context` next to the code within a token budget, and rendered to AGENTS.md or CLAUDE.md for tools that need a file.
+**Every session forgets.** Gotchas, decisions, and conventions live in the repository, next to the code they describe, and come back on the next `context` call.
 
-**Scaling to a swarm means a merge queue.** Ten agents need someone to split the work and a queue to land it one change at a time. *Tessra plans and lands without one.* `plan` partitions an intent into groups of dependency-connected units and hands each agent a scoped, budgeted capability; the frontier lands every change that meets the standard as it arrives, tens of thousands of landings per hour on a small crate.
+**A swarm needs a merge queue.** Not here. `plan` splits the work by dependencies, and the frontier lands every verified change as it arrives.
 
-**One misbehaving agent can undo a day.** Nothing records which agent did what, and cleaning up after a bad one means reading history by hand. *Tessra signs every operation* against a capability that traces back to the owner, scores every change for risk, throttles and then revokes an agent that writes outside its scope, and unwinds all of its unlanded work in one operation.
+**One bad agent can wreck a day.** Every operation is signed and scoped. An agent that strays is throttled, then revoked, and its unlanded work is unwound in one command.
 
-**The tools talk to people, not programs.** Version control speaks in text meant for a terminal, so an agent scrapes it and guesses at state. *Tessra's interface is thirteen verbs* over a CLI and MCP, every response in one machine-readable shape that names the next step, every read within a token budget.
-
-**Nobody wants to leave GitHub.** *Tessra runs beside `.git/`* in the checkout you already have and bridges losslessly in both directions: landings become ordinary commits, and commits your teammates push land on trunk. Adopt it for one repository without asking anyone else to change anything.
+Tessra runs beside `.git/` in the checkout you already have and bridges both ways. Adopting it changes nothing for the rest of your team.
 
 ## Get started
 
