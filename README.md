@@ -49,7 +49,7 @@ Built for agents that write code around the clock, and for the humans who decide
 
 ## Why Tessra
 
-Your agents write code around the clock. Your version control still assumes one author, one branch, and a human reading every diff.
+Your version control still assumes one author, one branch, and a human reading every diff.
 
 **Agents block each other.** Two agents in one file means conflict markers, a rebase, and a retry. Tessra merges functions, not lines. Agents editing different parts of the same file both land.
 
