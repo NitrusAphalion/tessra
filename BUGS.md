@@ -7,53 +7,7 @@ Known design gaps that are **not** bugs (single machine only, the L0 verifier sa
 *Entries below cite commit hashes such as `42a26fb` and `7440272` from the project's history
 before it was open-sourced as Tessra. Those commits are not part of this repository.*
 
----
-
-## Open
-
-### A refused landing charges the author anomaly points on every frontier pass, and three passes revoke the agent
-- **Status:** open
-- **When:** 2026-09-10
-- **Ran:** `tessra promote --to landed --all` three times as the owner while a proposed change from agent `claude` was refused for `structural(test.weakened)`
-- **Expected:** the same refusal three times; the author did nothing in between
-- **Got:** the third pass revoked agent `claude`. The refusal branch of `land` in `verbs.rs` records 2 anomaly points against `rev.author` for "landing refused: weakened tests" each time the frontier evaluates the change, `anomaly_revoke` defaults to 6, and revocation is permanent for the name. The agent's proposed change was unwound and its workspaces dropped, by the owner's retries rather than by anything the agent did.
-- **Repro:** a standard with `forbid structural(test.weakened)`; an agent proposes a change that edits a test; run `promote --to landed --all` three times
-- **Where:** M5 · tessra-daemon · verbs.rs, the refusal branch of `land`, and anomaly.rs
-- **Env:** Windows 11, release, `tessra 0.1.0` at 8fb2203
-
-Charging once per revision, or only on the author's own `promote` rather than on the owner's frontier pass, would keep the signal without making a retry lethal.
-
-### `forbid ... unless approved(human)` opens no approval request
-- **Status:** open
-- **When:** 2026-09-10
-- **Ran:** with `forbid structural(test.weakened) unless approved(human)` in the trunk standard and a human principal on an inbox channel, `tessra promote --to landed --all` on a change that edits a test
-- **Expected:** a refusal naming an approval request, a file in the inbox, and the request in `query --kind exceptions`, as `require approved(human)` produces
-- **Got:** `STANDARD_UNMET` naming `forbid structural(test.weakened)` and no request; the exceptions queue and the inbox stayed empty. `ensure_approval_request` looks only at clauses whose predicate is `approved(...)`, not at an `unless`. The approval had to be attested directly with `tessra --as malon attest --kind approval.human --subject <revision> --result true`, after which the landing passed.
-- **Repro:** the standard above, any change that modifies a test, one landing attempt
-- **Where:** M5 · tessra-daemon · verbs.rs, `ensure_approval_request`
-- **Env:** Windows 11, release, `tessra 0.1.0` at 8fb2203
-
-### `structural(flags.none)` holds at landing even when the snapshot was flagged
-- **Status:** open
-- **When:** 2026-09-10
-- **Ran:** `tessra promote --to landed --all` on the change above, whose snapshot carried the secrets flag and whose `verify` reported `flags.none` unmet
-- **Expected:** the landing refused with `STANDARD_UNMET` naming `structural(flags.none)`
-- **Got:** landed, `met: 3, unmet: 0`. The clause reads `ctx.revision.flags`, and the revision a landing creates by merging onto trunk carries no flags, so the clause holds there regardless of the snapshot.
-- **Repro:** any snapshot with a flag: propose it, land it
-- **Where:** M3 · tessra-oplog · standard.rs, the `flags.none` arm, and the landing in tessra-daemon that builds the merged revision
-- **Env:** Windows 11, release, `tessra 0.1.0` at ed3c646
-
-Either the merged revision should inherit the flags of the snapshot it lands, or the clause should be evaluated against the proposed revision.
-
-### `server::tests::serve_and_call_over_loopback` failed once under the full parallel run
-- **Status:** open
-- **When:** 2026-09-06
-- **Ran:** `cargo test --workspace` (debug), the run right after adding three bridge tests that drive git in temp checkouts
-- **Expected:** pass
-- **Got:** panic at `server.rs:308:49`, the `client::call(&endpoint, &req).unwrap()` for the first request: the connection to the just-started daemon failed. Passed when run alone and on three further full runs in a row, so it is timing-dependent: the test polls `Endpoint::read` for the daemon file and calls as soon as it appears, and under load the listener may not be accepting yet, or another test's daemon file race is involved.
-- **Repro:** not reproduced; run the full suite repeatedly under load
-- **Where:** M1 · tessra-daemon · server.rs (test), or `Endpoint` being written before the listener binds
-- **Env:** Windows 11, debug, `tessra 0.1.0` at 42a26fb
+The four entries that were still open when this file was frozen are now issues [#1](https://github.com/NitrusAphalion/tessra/issues/1), [#2](https://github.com/NitrusAphalion/tessra/issues/2), [#3](https://github.com/NitrusAphalion/tessra/issues/3), and [#5](https://github.com/NitrusAphalion/tessra/issues/5).
 
 ---
 
