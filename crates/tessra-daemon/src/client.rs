@@ -10,10 +10,30 @@ use serde_json::Value;
 use crate::server::{Endpoint, Request};
 use crate::{Error, Result};
 
+/// Connect to the daemon. A loaded machine can miss the short connect
+/// timeout right after the daemon comes up, and callers reach for it the
+/// moment its endpoint file appears, so a timeout is retried with backoff
+/// for a couple of seconds. A refused connection fails at once: that is a
+/// daemon that is gone, and the caller handles the stale endpoint.
+fn connect(addr: &SocketAddr) -> std::io::Result<TcpStream> {
+    let mut delay = Duration::from_millis(50);
+    for attempt in 0..6 {
+        match TcpStream::connect_timeout(addr, Duration::from_millis(500)) {
+            Ok(stream) => return Ok(stream),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut && attempt < 5 => {
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
 /// Send one request and read one response line.
 pub fn call(endpoint: &Endpoint, req: &Request) -> Result<Value> {
     let addr: SocketAddr = ([127, 0, 0, 1], endpoint.port).into();
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
+    let mut stream = connect(&addr)?;
     stream.set_read_timeout(Some(Duration::from_secs(600)))?;
     let line = serde_json::to_string(req)?;
     stream.write_all(line.as_bytes())?;

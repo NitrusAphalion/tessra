@@ -73,7 +73,11 @@ pub fn serve(repo: Repo, idle: Duration) -> std::io::Result<()> {
     let token = hex::encode(tessra_core::EntityId::random().0);
     let pid = std::process::id();
     let endpoint_path = tessra_dir.join("daemon");
-    std::fs::write(&endpoint_path, format!("{port}\n{token}\n{pid}\n"))?;
+    // Written whole and renamed into place, so a client polling for the
+    // file never reads a half-written port or token.
+    let staging = tessra_dir.join("daemon.tmp");
+    std::fs::write(&staging, format!("{port}\n{token}\n{pid}\n"))?;
+    std::fs::rename(&staging, &endpoint_path)?;
 
     let shared = Arc::new(Shared {
         repo: Mutex::new(repo),
