@@ -38,6 +38,9 @@ fn db_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Db(e.to_string())
 }
 
+/// The puts an open batch has collected, by object ID; `None` while no batch is open.
+type PendingBatch = Option<HashMap<ObjectId, Vec<u8>>>;
+
 /// A redb-backed object store. Cheap to clone; clones share the database.
 ///
 /// A batch, when open, collects puts in memory and writes them in one
@@ -46,7 +49,7 @@ fn db_err<E: std::fmt::Display>(e: E) -> Error {
 #[derive(Clone)]
 pub struct RedbStore {
     db: Arc<Database>,
-    pending: Arc<Mutex<Option<HashMap<ObjectId, Vec<u8>>>>>,
+    pending: Arc<Mutex<PendingBatch>>,
 }
 
 impl RedbStore {

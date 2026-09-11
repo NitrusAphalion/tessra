@@ -706,6 +706,6 @@ mod tests {
         let idx = index(all);
         let cov = covering_tests(&idx);
         assert_eq!(cov.get(&lib[0].nid).map(|v| v.len()), Some(1));
-        assert!(cov.get(&lib[1].nid).is_none());
+        assert!(!cov.contains_key(&lib[1].nid));
     }
 }

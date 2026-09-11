@@ -152,9 +152,7 @@ pub fn merge3(base: &Flat, a: &Flat, b: &Flat) -> (Flat, Vec<String>) {
         let (lb, la, lb2) = (base.get(p), a.get(p), b.get(p));
         let pick = if la == lb {
             lb2.cloned()
-        } else if lb2 == lb {
-            la.cloned()
-        } else if la == lb2 {
+        } else if lb2 == lb || la == lb2 {
             la.cloned()
         } else {
             conflicts.push(p.clone());

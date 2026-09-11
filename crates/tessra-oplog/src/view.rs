@@ -351,9 +351,7 @@ impl<'a, S: ObjectStore> ViewState<'a, S> {
             let (vb, va, vb2) = (base.deployed.get(k), a.deployed.get(k), b.deployed.get(k));
             let out = if va == vb {
                 vb2.copied()
-            } else if vb2 == vb {
-                va.copied()
-            } else if va == vb2 {
+            } else if vb2 == vb || va == vb2 {
                 va.copied()
             } else {
                 // Both changed differently: lower ID wins, deterministic. Rare and M6 work.
@@ -414,9 +412,7 @@ impl<'a, S: ObjectStore> ViewState<'a, S> {
 fn merge_line(base: &LineState, a: &LineState, b: &LineState) -> LineState {
     let head = if a.head == base.head {
         b.head.clone()
-    } else if b.head == base.head {
-        a.head.clone()
-    } else if a.head == b.head {
+    } else if b.head == base.head || a.head == b.head {
         a.head.clone()
     } else {
         match (Pointer::from_value(&a.head), Pointer::from_value(&b.head)) {

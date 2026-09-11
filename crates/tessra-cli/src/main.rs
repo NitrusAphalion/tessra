@@ -517,7 +517,9 @@ fn run() -> i32 {
     } else {
         client::ensure(&tessra_dir, &exe, &root, true)
     };
-    let mut caller: Box<dyn FnMut(&str, &Value) -> Value> = match endpoint {
+    // One verb call, into the daemon or into this process.
+    type Caller = Box<dyn FnMut(&str, &Value) -> Value>;
+    let mut caller: Caller = match endpoint {
         Some(endpoint) => {
             let agent = cli.agent.clone();
             let model = cli.model.clone();

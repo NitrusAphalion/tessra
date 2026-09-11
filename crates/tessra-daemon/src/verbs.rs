@@ -481,7 +481,7 @@ fn ops_since(repo: &Repo, cursor: Option<&str>) -> Result<Vec<Json>> {
         ops.push((op.time, id, op.kind.clone(), op.author, op.effects.len()));
         queue.extend(op.parents.iter().copied());
     }
-    ops.sort_by(|a, b| b.0.cmp(&a.0));
+    ops.sort_by_key(|o| std::cmp::Reverse(o.0));
     Ok(ops
         .into_iter()
         .map(|(t, id, kind, author, n)| json!({ "op": id.to_hex(), "kind": kind, "author": author.to_letters(), "time": t, "effects": n }))
