@@ -11,8 +11,8 @@ Built for agents that write code around the clock, and for the humans who decide
 
 <p align="center">
 <strong>Using Tessra</strong><br>
-<a href="#get-started">Get started</a> ·
 <a href="#why-tessra">Why Tessra</a> ·
+<a href="#get-started">Get started</a> ·
 <a href="#how-it-works">How it works</a> ·
 <a href="#what-you-get">What you get</a> ·
 <a href="#how-agents-use-it">How agents use it</a> ·
@@ -34,7 +34,23 @@ Built for agents that write code around the clock, and for the humans who decide
 <img alt="Interface: CLI and MCP" src="https://img.shields.io/badge/interface-CLI%20%2B%20MCP-brightgreen">
 </p>
 
+<p align="center">
+<strong>About the name.</strong> A <em>tessera</em> is one tile in a mosaic. Tessra treats code the same way: functions, types, and imports are the tiles, each with an identity of its own, and a file is the picture they make when laid.
+</p>
+
 ---
+
+## Why Tessra
+
+Code is no longer scarce. Agents write most of it, in parallel, and they never sleep. That breaks the assumptions every version control system was built on: one author at a time, one working directory, a human reading text output, and a human on hand to resolve conflicts.
+
+The bottleneck has moved from writing code to knowing what to trust, why it exists, and how to coordinate many authors. Tessra is built for that bottleneck:
+
+- **Nothing blocks.** A conflict, a failed check, or a missing review is a state stored in the repository, never an error that stops an agent.
+- **Nothing lands unproven.** Landing is gated by a standard: a rule set the owner writes as data, satisfied only by signed attestations from verifiers. An agent's own claim that the tests pass carries no weight.
+- **Files are a view.** The repository is a graph of semantic units, history, intents, and memory. Two agents editing different functions of one file never conflict.
+- **Agents are the interface.** There is no UI. Thirteen verbs over a CLI and MCP, every response in one machine-readable shape, every read within a token budget.
+- **Git stays where it is.** Tessra runs colocated with an existing git checkout and bridges losslessly in both directions, so a project can adopt it without leaving GitHub.
 
 ## Get started
 
@@ -108,20 +124,6 @@ tessra export --format git --branch main      # landed revisions become ordinary
 ```
 
 The session acts as agent `claude`, proposes changes, and you land them. Any MCP client connects the same way. [How agents use it](#how-agents-use-it) describes the loop a session follows.
-
-## Why Tessra
-
-Code is no longer scarce. Agents write most of it, in parallel, and they never sleep. That breaks the assumptions every version control system was built on: one author at a time, one working directory, a human reading text output, and a human on hand to resolve conflicts.
-
-The bottleneck has moved from writing code to knowing what to trust, why it exists, and how to coordinate many authors. Tessra is built for that bottleneck:
-
-- **Nothing blocks.** A conflict, a failed check, or a missing review is a state stored in the repository, never an error that stops an agent.
-- **Nothing lands unproven.** Landing is gated by a standard: a rule set the owner writes as data, satisfied only by signed attestations from verifiers. An agent's own claim that the tests pass carries no weight.
-- **Files are a view.** The repository is a graph of semantic units, history, intents, and memory. Two agents editing different functions of one file never conflict.
-- **Agents are the interface.** There is no UI. Thirteen verbs over a CLI and MCP, every response in one machine-readable shape, every read within a token budget.
-- **Git stays where it is.** Tessra runs colocated with an existing git checkout and bridges losslessly in both directions, so a project can adopt it without leaving GitHub.
-
-**About the name.** A *tessera* is one tile in a mosaic. Tessra treats code the same way: functions, types, and imports are the tiles, each with an identity of its own, and a file is the picture they make when laid.
 
 ## How it works
 
