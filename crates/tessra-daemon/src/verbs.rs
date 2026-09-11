@@ -5246,6 +5246,84 @@ mod tests {
     }
 
     #[test]
+    fn an_unless_approved_escape_opens_an_approval_request() {
+        let (_dir, mut repo, mut actor) = scratch();
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "standard",
+            &json!({ "forbid": ["structural(test.weakened) unless approved(human)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // A landed test, then a change that edits it.
+        let with_test = "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one_is_one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n";
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": with_test }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut actor, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let edited =
+            with_test.replace("assert_eq!(super::one(), 1);", "assert!(super::one() > 0);");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": edited }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "loosen the test" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "promote",
+            &json!({ "to": "proposed" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The frontier refuses it, names the escape, and opens a request a human can answer.
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "promote",
+            &json!({ "to": "landed", "all": true }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let result = &out["result"]["results"][0];
+        assert_eq!(result["landed"], json!(false), "{out}");
+        let why = result["why"].as_str().unwrap_or("");
+        assert!(why.contains("unless approved(human)"), "{out}");
+        assert!(why.contains("request "), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "query",
+            &json!({ "kind": "exceptions" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(
+            out["result"]["exceptions"].as_array().map(|a| a.len()),
+            Some(1),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn snapshot_then_verify_runs_the_verifiers() {
         let (_dir, mut repo, mut actor) = scratch();
         // A verifier that passes wherever the tests can run at all.

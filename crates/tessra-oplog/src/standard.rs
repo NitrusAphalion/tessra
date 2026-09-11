@@ -515,7 +515,12 @@ fn check_clause(ctx: &Ctx<'_>, c: &Clause) -> Result<Option<Unmet>> {
         }
     }
     let h = holds(ctx, &c.pred)?;
-    let label = describe(&c.pred);
+    let mut label = describe(&c.pred);
+    // The escape hatch is part of what is unmet: a person reading the refusal
+    // sees what would satisfy it, and the daemon knows to ask for it.
+    if let Some(u) = &c.unless {
+        label = format!("{label} unless {}", describe(u));
+    }
     Ok(match (c.op.as_str(), h) {
         ("require", Holds::Yes) => None,
         ("require", Holds::No(reason)) => Some(Unmet {
