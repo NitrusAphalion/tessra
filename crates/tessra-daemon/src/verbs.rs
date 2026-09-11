@@ -2956,7 +2956,9 @@ fn land_one(
         author: rev.author,
         time: now(),
         ops: None,
-        flags: None,
+        // What was flagged on the proposed snapshot is still in what lands, so
+        // the standard sees at landing the flags that `verify` reported.
+        flags: rev.flags.clone(),
     };
     let landing_id = repo.store().put(&landing)?;
     // Landing steps 6 and 7: collect what applies to the landing
@@ -5209,6 +5211,36 @@ mod tests {
             factors
                 .iter()
                 .any(|f| f["name"] == json!("sensitive_scope")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_flagged_snapshot_does_not_land_under_flags_none() {
+        let (_dir, mut repo, mut actor) = scratch();
+        // A key-shaped fixture, built at run time so this source is not itself flagged.
+        let key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "notes.txt", "content": format!("token {key}\n") }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "oops" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert!(out["result"]["flags"]["secrets"].is_array(), "{out}");
+        // The default standard requires flags.none, and the landing sees the flags.
+        let out = call(&mut repo, &mut actor, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert_eq!(out["code"], json!("STANDARD_UNMET"), "{out}");
+        assert!(
+            out["message"].as_str().unwrap_or("").contains("flags.none"),
             "{out}"
         );
     }
