@@ -55,7 +55,7 @@ The spec wins over the code. A test that disagrees with `spec/` is a bug in one 
 
 ```
 cargo build
-target/debug/tessra init            # inside any git checkout; imports HEAD
+target/debug/tessra init            # in any directory; in a git checkout, also imports HEAD
 target/debug/tessra status --pretty
 target/debug/tessra remember --kind gotcha --body "..." --scope-kind path --scope-ref src
 target/debug/tessra --agent my-agent workspace --action create
@@ -100,7 +100,7 @@ State bundles: `tessra snapshot --with-state` (or config `snapshot_state=true`) 
 
 `tessra edit --rename old --to new` is the first semantic operation: it renames the identifier as a whole word in every tracked file with a grammar (or one `--path`) and records the op on the change. At landing, each side's renames, recorded or inferred from a unit keeping its identity under a new name, are applied to what the other side contributes, so a concurrent change that added a call to the old name lands calling the new one, in the same file or another. The landing result lists each such resolution under `semantic`. A rename and a body edit of the same unit compose; a unit renamed differently on both sides, or a unit added under a name the other side renamed something to, is a conflict.
 
-Every command prints the response shape from VERBS.md. The store and keys live under the local application data directory, never in the repository.
+Git is optional at run time. `init` runs the `git` command only when a `.git` directory is present, to import the history, and the bridge verbs `export --format git` and `import --branch` run it; no other verb does, so a repository without git works end to end. Every command prints the response shape from VERBS.md. The store and keys live under the local application data directory, never in the repository.
 
 ## The daemon
 
