@@ -4,6 +4,10 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.2 - 2026-09-10
+
 ### Fixed
 
 - A landing refused for a weakened test charges the change's author anomaly points once per revision, not on every frontier pass, so an owner's retries can no longer revoke an agent (#1).
