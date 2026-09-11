@@ -17,7 +17,7 @@ use crate::tree::{self, Flat, Leaf};
 use crate::{now, Error, Result};
 
 fn git(root: &Path, args: &[&str]) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = crate::quiet(Command::new("git"))
         .arg("-C")
         .arg(root)
         .args(args)
@@ -37,7 +37,7 @@ struct Entry {
 }
 
 fn ls_tree(root: &Path, commit: &str) -> Result<Vec<Entry>> {
-    let listing = Command::new("git")
+    let listing = crate::quiet(Command::new("git"))
         .arg("-C")
         .arg(root)
         .args(["ls-tree", "-r", "-z", commit])
@@ -75,7 +75,7 @@ fn cat_blobs(root: &Path, oids: &[String]) -> Result<HashMap<String, Vec<u8>>> {
     if oids.is_empty() {
         return Ok(contents);
     }
-    let mut child = Command::new("git")
+    let mut child = crate::quiet(Command::new("git"))
         .arg("-C")
         .arg(root)
         .args(["cat-file", "--batch"])

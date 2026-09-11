@@ -122,7 +122,13 @@ tessra init                                       # once per clone; imports the 
 tessra status --pretty
 ```
 
-The trunk standard requires `attest(tests.pass)`, which `verify` satisfies by running `cargo test --workspace` in a scratch copy, and forbids `structural(test.weakened)`. A Claude Code session in this checkout acts as agent `claude` through `.mcp.json`; any other agent or person follows the same loop:
+The trunk standard requires `attest(tests.pass)`, which `verify` satisfies by running `cargo test --workspace` in a scratch copy, and forbids `structural(test.weakened)` unless a human approves. `test.weakened` means any existing test that was modified or deleted, so a change that touches a test needs the owner's approval attested on its revision before it lands:
+
+```sh
+tessra --as malon attest --kind approval.human --subject <revision> --result true
+```
+
+Approve first and land once: every refused landing for a weakened test charges the change's author anomaly points, and six points revoke the agent for good. That is how agent `claude` was lost on the first day, which is why a Claude Code session in this checkout acts as agent `claude-code` through `.mcp.json`. Any other agent or person follows the same loop:
 
 ```sh
 tessra --agent <you> workspace --action create            # a directory of your own; the response names it

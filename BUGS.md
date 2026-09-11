@@ -47,17 +47,27 @@ before it was open-sourced as Tessra. Those commits are not part of this reposit
 
 ## Open
 
-### The secret scanner flags its own source, so every snapshot of this repository carries a secrets flag
+### A refused landing charges the author anomaly points on every frontier pass, and three passes revoke the agent
 - **Status:** open
 - **When:** 2026-09-10
-- **Ran:** `tessra --agent claude --workspace <id> snapshot --title "..."` in this repository, right after `tessra init`
-- **Expected:** no flags; the tree holds no secrets
-- **Got:** `flags.secrets` names `crates/tessra-daemon/src/fs.rs` twice, for the private-key-block and aws-access-key patterns. The hits are `scan_secrets` itself, whose source spells out the PEM header and footer it looks for, and the fixture in its unit test, which starts with the AWS key prefix followed by sixteen alphanumerics. Every snapshot then reports `structural(flags.none)` unmet and a risk score of 30, medium, from the `secrets` factor.
-- **Repro:** `tessra init` here, create a workspace, snapshot, read `result.flags`
-- **Where:** M2 · tessra-daemon · fs.rs, `scan_secrets` and `snapshot_and_materialize_round_trip_with_flags`
-- **Env:** Windows 11, release, `tessra 0.1.0` at ed3c646
+- **Ran:** `tessra promote --to landed --all` three times as the owner while a proposed change from agent `claude` was refused for `structural(test.weakened)`
+- **Expected:** the same refusal three times; the author did nothing in between
+- **Got:** the third pass revoked agent `claude`. The refusal branch of `land` in `verbs.rs` records 2 anomaly points against `rev.author` for "landing refused: weakened tests" each time the frontier evaluates the change, `anomaly_revoke` defaults to 6, and revocation is permanent for the name. The agent's proposed change was unwound and its workspaces dropped, by the owner's retries rather than by anything the agent did.
+- **Repro:** a standard with `forbid structural(test.weakened)`; an agent proposes a change that edits a test; run `promote --to landed --all` three times
+- **Where:** M5 · tessra-daemon · verbs.rs, the refusal branch of `land`, and anomaly.rs
+- **Env:** Windows 11, release, `tessra 0.1.0` at 8fb2203
 
-Assembling the needles at compile time and building the fixture at runtime would keep the file from containing them verbatim without changing what the scanner detects. An exemption for paths that legitimately hold secret-shaped text, as a config key or a tracking rule, would cover other repositories with such fixtures.
+Charging once per revision, or only on the author's own `promote` rather than on the owner's frontier pass, would keep the signal without making a retry lethal.
+
+### `forbid ... unless approved(human)` opens no approval request
+- **Status:** open
+- **When:** 2026-09-10
+- **Ran:** with `forbid structural(test.weakened) unless approved(human)` in the trunk standard and a human principal on an inbox channel, `tessra promote --to landed --all` on a change that edits a test
+- **Expected:** a refusal naming an approval request, a file in the inbox, and the request in `query --kind exceptions`, as `require approved(human)` produces
+- **Got:** `STANDARD_UNMET` naming `forbid structural(test.weakened)` and no request; the exceptions queue and the inbox stayed empty. `ensure_approval_request` looks only at clauses whose predicate is `approved(...)`, not at an `unless`. The approval had to be attested directly with `tessra --as malon attest --kind approval.human --subject <revision> --result true`, after which the landing passed.
+- **Repro:** the standard above, any change that modifies a test, one landing attempt
+- **Where:** M5 · tessra-daemon · verbs.rs, `ensure_approval_request`
+- **Env:** Windows 11, release, `tessra 0.1.0` at 8fb2203
 
 ### `structural(flags.none)` holds at landing even when the snapshot was flagged
 - **Status:** open
@@ -84,6 +94,15 @@ Either the merged revision should inherit the flags of the snapshot it lands, or
 ---
 
 ## Resolved
+
+### The secret scanner flagged its own source, so every snapshot of this repository carried a secrets flag
+- **Status:** resolved · commit `7a8b447` · 2026-09-10
+- **When:** 2026-09-10
+- **Ran:** `tessra --agent claude --workspace <id> snapshot --title "..."` in this repository, right after `tessra init`
+- **Expected:** no flags; the tree holds no secrets
+- **Got:** `flags.secrets` named `crates/tessra-daemon/src/fs.rs` twice, for the private-key-block and aws-access-key patterns: `scan_secrets` spelled out the PEM header and footer it looks for, and its unit test's fixture started with the AWS key prefix followed by sixteen alphanumerics. Every snapshot reported `structural(flags.none)` unmet and a risk score of 30 from the `secrets` factor.
+- **Where:** M2 · tessra-daemon · fs.rs. Fix: the needles are assembled at compile time with `concat!` and the fixture at run time with `format!`, so the file never contains them verbatim; what the scanner detects is unchanged. An exemption for paths that legitimately hold secret-shaped text remains open as a feature.
+- **Env:** Windows 11, release, `tessra 0.1.0` at ed3c646
 
 ### `import --branch` leaves the colocated checkout's workspace on the pre-import revision
 - **Status:** resolved · commit `42a26fb` · 2026-09-06

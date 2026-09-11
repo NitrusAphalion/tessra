@@ -267,7 +267,7 @@ pub fn verifiers_for(repo: &Repo, dir: &Path) -> Vec<Verifier> {
 pub fn environment(repo: &Repo, v: &Verifier) -> Result<ObjectId> {
     let mut tools = BTreeMap::new();
     let probe = |cmd: &str| -> Option<String> {
-        let out = Command::new(cmd).arg("--version").output().ok()?;
+        let out = crate::quiet(Command::new(cmd)).arg("--version").output().ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() {
             None
@@ -412,7 +412,7 @@ pub fn run(repo: &Repo, v: &Verifier, dir: &Path, select: &[String], timeout: Du
         (Filter::Pytest, true) => argv.push("-v".into()),
         _ => {}
     }
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = crate::quiet(Command::new(&argv[0]));
     cmd.args(&argv[1..]);
     cmd.current_dir(dir);
     cmd.env_clear();

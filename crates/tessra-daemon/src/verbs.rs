@@ -3888,7 +3888,7 @@ fn capture_environment(repo: &Repo, dir: &std::path::Path) -> Result<(ObjectId, 
         }
     }
     let probe = |cmd: &str| -> Option<String> {
-        let out = std::process::Command::new(cmd).arg("--version").output().ok()?;
+        let out = crate::quiet(std::process::Command::new(cmd)).arg("--version").output().ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().lines().next().unwrap_or("").to_string();
         if s.is_empty() { None } else { Some(s) }
     };

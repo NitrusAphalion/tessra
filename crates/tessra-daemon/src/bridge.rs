@@ -98,7 +98,7 @@ fn follow_checkout(repo: &mut Repo, work: &Path) -> Result<Json> {
 }
 
 fn git_out(dir: &Path, envs: &[(&str, String)], args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
-    let mut c = Command::new("git");
+    let mut c = crate::quiet(Command::new("git"));
     c.arg("-C").arg(plain(dir)).args(args);
     for (k, v) in envs {
         c.env(k, v);

@@ -379,3 +379,18 @@ impl Repo {
         Ok(self.store().get_bytes(id)?)
     }
 }
+
+/// A command the daemon runs for itself. On Windows the daemon has no
+/// console, so a child would otherwise open a console window of its own and
+/// pop it in front of whatever the person is doing; this keeps the child
+/// windowless. Output still flows through whatever stdio the caller sets.
+pub(crate) fn quiet(cmd: std::process::Command) -> std::process::Command {
+    #[cfg(windows)]
+    let cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = cmd;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    };
+    cmd
+}
