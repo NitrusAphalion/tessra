@@ -121,7 +121,7 @@ The bottleneck has moved from writing code to knowing what to trust, why it exis
 - **Agents are the interface.** There is no UI. Thirteen verbs over a CLI and MCP, every response in one machine-readable shape, every read within a token budget.
 - **Git stays where it is.** Tessra runs colocated with an existing git checkout and bridges losslessly in both directions, so a project can adopt it without leaving GitHub.
 
-**About the name.** A *tessera* is one tile in a mosaic. Tessra treats code the same way: functions, types, and imports are the tiles, each with an identity of its own, and a file is the picture they make when laid. Agents set their own tiles, and nobody argues over grout lines. The logo is a T laid the same way, with one tile freshly landed in green.
+**About the name.** A *tessera* is one tile in a mosaic. Tessra treats code the same way: functions, types, and imports are the tiles, each with an identity of its own, and a file is the picture they make when laid.
 
 ## How it works
 
