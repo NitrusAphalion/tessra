@@ -1801,8 +1801,9 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let mut next: Vec<&str> = vec!["verify", "promote --to proposed"];
     match arg_str(args, "then") {
         Some("verify") => {
-            let (met, unmet, _) = standard_status(repo, &rev_id, &rev)?;
-            result["verify"] = json!({ "met": met, "unmet": unmet.iter().map(|u| json!({ "clause": u.clause, "reason": u.reason })).collect::<Vec<_>>() });
+            let r = verify(repo, actor, &json!({}))?;
+            result["verify"] = r.result;
+            next = vec!["promote --to proposed"];
         }
         Some("promote") => {
             let r = promote(repo, actor, &json!({ "to": "proposed" }))?;
@@ -4551,6 +4552,25 @@ mod tests {
         .unwrap();
         let actor = repo.daemon_actor();
         (dir, repo, actor)
+    }
+
+    #[test]
+    fn snapshot_then_verify_runs_the_verifiers() {
+        let (_dir, mut repo, mut actor) = scratch();
+        // A verifier that passes wherever the tests can run at all.
+        let out = call(&mut repo, &mut actor, "config", &json!({ "set": ["verifiers.tests.pass=cargo --version"] }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut actor, "standard", &json!({ "require": ["attest(tests.pass)"] }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut actor, "edit", &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 {\n    1\n}\n" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut actor, "snapshot", &json!({ "title": "one", "then": "verify" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The follow-on ran the verifier and attested, rather than only reading the standard.
+        let ran = out["result"]["verify"]["ran"].as_array().expect("then verify runs the verifiers");
+        assert!(ran.iter().any(|r| r["kind"] == json!("tests.pass") && r["result"] == json!(true)), "{out}");
+        assert_eq!(out["result"]["verify"]["met"], json!(2), "{out}");
+        assert_eq!(out["next"], json!(["promote --to proposed"]), "{out}");
     }
 
     #[test]

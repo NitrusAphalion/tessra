@@ -11,6 +11,10 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 - CONTRIBUTING.md, this changelog, and a vulnerability reporting policy in SECURITY.md.
 - The repository is developed under Tessra: `.mcp.json` makes a Claude Code session agent `claude`, and DEVELOPING.md documents the loop.
 
+### Fixed
+
+- `snapshot --then verify` runs the verifiers and records their attestations, as `verify` does, instead of only evaluating the standard.
+
 ## 0.1.0 - 2026-09-10
 
 ### Added

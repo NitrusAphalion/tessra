@@ -155,6 +155,7 @@ enum Cmd {
     Snapshot {
         #[arg(long)]
         title: Option<String>,
+        /// After the snapshot: `verify` runs the verifiers and reports the standard clause by clause; `promote` proposes the change.
         #[arg(long)]
         then: Option<String>,
         /// Also record the toolchain, lockfile hashes, and the state paths (target, data, .venv, node_modules or config state_paths) as trees.
