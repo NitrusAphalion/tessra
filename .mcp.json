@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "tessra": { "type": "stdio", "command": "tessra", "args": ["--agent", "claude", "mcp"] }
+  }
+}

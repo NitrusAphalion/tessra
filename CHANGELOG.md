@@ -9,6 +9,7 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 - README: a get-started guide, mechanism diagrams, a logo, and sections on standards and hooks, working alongside git, reading the repository, swarms, memory, undoing and removing, configuration, and troubleshooting.
 - Bugs are filed as GitHub issues, with an issue template that mirrors the entry format in BUGS.md.
 - CONTRIBUTING.md, this changelog, and a vulnerability reporting policy in SECURITY.md.
+- The repository is developed under Tessra: `.mcp.json` makes a Claude Code session agent `claude`, and DEVELOPING.md documents the loop.
 
 ## 0.1.0 - 2026-09-10
 

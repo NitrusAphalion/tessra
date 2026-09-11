@@ -524,7 +524,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/tessra-cli    # installs the tessra binary from this checkout
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the pull request rules, and [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the pull request rules, and [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, how the repository is developed under Tessra itself, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
 
 ## License
 

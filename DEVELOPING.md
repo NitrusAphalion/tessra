@@ -112,6 +112,29 @@ tessra daemon --idle-minutes 30     # run it in the foreground yourself
 
 On Windows a detached child inherits every inheritable handle of its parent, including a pipe a caller is reading. The CLI marks its standard handles non-inheritable before spawning the daemon, or `tessra status | something` would block until the daemon exited.
 
+## Developing under Tessra
+
+The repository is developed under Tessra. The daemon that manages it should be a released binary, not the working tree you are changing, so install one and keep `target/debug/tessra` for trying your changes:
+
+```sh
+cargo install --path crates/tessra-cli --locked   # or the installer from the README; either puts `tessra` on PATH
+tessra init                                       # once per clone; imports the git history as trunk
+tessra status --pretty
+```
+
+The trunk standard requires `attest(tests.pass)`, which `verify` satisfies by running `cargo test --workspace` in a scratch copy, and forbids `structural(test.weakened)`. A Claude Code session in this checkout acts as agent `claude` through `.mcp.json`; any other agent or person follows the same loop:
+
+```sh
+tessra --agent <you> workspace --action create            # a directory of your own; the response names it
+# edit there with any tool
+tessra --agent <you> --workspace <id> snapshot --title "..." --then verify
+tessra --agent <you> --workspace <id> promote --to proposed
+tessra promote --to landed --all                           # the owner lands what meets the standard
+tessra export --format git --branch main && git push       # landings become commits on main
+```
+
+Record what you learn with `tessra remember`; `tessra context --path <file>` shows it to the next session. Testing a change to Tessra itself means running `target/debug/tessra --no-daemon` against a scratch repository, never against this repository's daemon.
+
 ## Releasing
 
 Releases are built by [dist](https://axodotdev.github.io/cargo-dist) from `dist-workspace.toml`. `.github/workflows/release.yml` is generated from that file and is not edited by hand. Pushing a tag `vX.Y.Z` that matches `version` under `[workspace.package]` in `Cargo.toml` builds `tessra` for macOS, Linux, and Windows on x86_64 and arm64, and publishes a GitHub release carrying the archives, the shell and PowerShell installers, checksums, and a source tarball. A version with a pre-release suffix, such as `v0.2.0-beta.1`, is published as a pre-release, which `releases/latest` and the install one-liners in the README skip.
