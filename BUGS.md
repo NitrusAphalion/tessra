@@ -47,6 +47,30 @@ before it was open-sourced as Tessra. Those commits are not part of this reposit
 
 ## Open
 
+### The secret scanner flags its own source, so every snapshot of this repository carries a secrets flag
+- **Status:** open
+- **When:** 2026-09-10
+- **Ran:** `tessra --agent claude --workspace <id> snapshot --title "..."` in this repository, right after `tessra init`
+- **Expected:** no flags; the tree holds no secrets
+- **Got:** `flags.secrets` names `crates/tessra-daemon/src/fs.rs` twice, for the private-key-block and aws-access-key patterns. The hits are `scan_secrets` itself, whose source spells out the PEM header and footer it looks for, and the fixture in its unit test, which starts with the AWS key prefix followed by sixteen alphanumerics. Every snapshot then reports `structural(flags.none)` unmet and a risk score of 30, medium, from the `secrets` factor.
+- **Repro:** `tessra init` here, create a workspace, snapshot, read `result.flags`
+- **Where:** M2 · tessra-daemon · fs.rs, `scan_secrets` and `snapshot_and_materialize_round_trip_with_flags`
+- **Env:** Windows 11, release, `tessra 0.1.0` at ed3c646
+
+Assembling the needles at compile time and building the fixture at runtime would keep the file from containing them verbatim without changing what the scanner detects. An exemption for paths that legitimately hold secret-shaped text, as a config key or a tracking rule, would cover other repositories with such fixtures.
+
+### `structural(flags.none)` holds at landing even when the snapshot was flagged
+- **Status:** open
+- **When:** 2026-09-10
+- **Ran:** `tessra promote --to landed --all` on the change above, whose snapshot carried the secrets flag and whose `verify` reported `flags.none` unmet
+- **Expected:** the landing refused with `STANDARD_UNMET` naming `structural(flags.none)`
+- **Got:** landed, `met: 3, unmet: 0`. The clause reads `ctx.revision.flags`, and the revision a landing creates by merging onto trunk carries no flags, so the clause holds there regardless of the snapshot.
+- **Repro:** any snapshot with a flag: propose it, land it
+- **Where:** M3 · tessra-oplog · standard.rs, the `flags.none` arm, and the landing in tessra-daemon that builds the merged revision
+- **Env:** Windows 11, release, `tessra 0.1.0` at ed3c646
+
+Either the merged revision should inherit the flags of the snapshot it lands, or the clause should be evaluated against the proposed revision.
+
 ### `server::tests::serve_and_call_over_loopback` failed once under the full parallel run
 - **Status:** open
 - **When:** 2026-09-06
