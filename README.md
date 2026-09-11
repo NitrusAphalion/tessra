@@ -16,7 +16,14 @@ Built for agents that write code around the clock, and for the humans who decide
 <a href="#how-it-works">How it works</a> ·
 <a href="#what-you-get">What you get</a> ·
 <a href="#how-agents-use-it">How agents use it</a> ·
-<a href="#standards-and-hooks">Standards and hooks</a>
+<a href="#standards-and-hooks">Standards and hooks</a> ·
+<a href="#working-alongside-git">Working alongside git</a> ·
+<a href="#reading-the-repository">Reading the repository</a> ·
+<a href="#running-a-swarm">Running a swarm</a> ·
+<a href="#memory">Memory</a> ·
+<a href="#undoing-and-removing">Undoing and removing</a> ·
+<a href="#configuration">Configuration</a> ·
+<a href="#troubleshooting-and-faq">Troubleshooting and FAQ</a>
 </p>
 
 <p align="center">
@@ -78,6 +85,8 @@ tessra --version
 
 Git is optional. Tessra runs the `git` command only to import an existing checkout at `init` and for the git bridge. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
 
+Tessra is developed and tested on Windows 11. The macOS and Linux builds come from the same pipeline and have not been exercised there yet, so if something breaks, an [issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md) with the failing command is the most useful thing you can file.
+
 ### 2. Initialize a repository
 
 In any directory, with or without git:
@@ -124,6 +133,27 @@ tessra export --format git --branch main      # landed revisions become ordinary
 ```
 
 The session acts as agent `claude`, proposes changes, and you land them. Any MCP client connects the same way. [How agents use it](#how-agents-use-it) describes the loop a session follows.
+
+## Working alongside git
+
+Tessra never writes to `.git/` on its own. Landed revisions become commits when you export, and commits your teammates push become landed revisions when you import. Neither direction rewrites anything: an exported commit carries `Tessra-Change` and `Tessra-Revision` trailers, an imported commit's revision remembers its hash, and a second export of the same trunk creates nothing.
+
+```sh
+tessra promote --to landed --all                         # land what the agents proposed
+tessra export --format git --branch main                 # one commit per landing, authored by the agent that made it
+tessra export --format git --branch main --push origin   # the same, then push the branch
+
+git pull                                                 # teammates' commits arrive with git, as always
+tessra import --branch main                              # each new commit lands on trunk as a change of its own
+```
+
+That is the whole rhythm: land, export, push; pull, import. The daemon does not watch `.git/refs` yet, so run `import` yourself after a pull.
+
+What to expect:
+
+- Export writes commits on top of the newest exported or imported one, in trunk order, and moves the branch ref. A clean checkout of that branch is reset to the new tip; a dirty one is left alone, and the response says so.
+- Export is linear. A landing that merged concurrent changes becomes one commit, not a git merge. Import is first-parent, and a commit that conflicts with trunk stops the import at that commit.
+- `.tessra/` shows up as untracked until you add it to `.gitignore`. Nothing else in the tree changes.
 
 ## How it works
 
@@ -226,6 +256,19 @@ tessra standard                                                           # show
 
 An agent's own `attest` is stored but never satisfies a clause. When `verify` or `promote` finds a clause unmet, the response names the clause and the command that would satisfy it.
 
+### Making `verify` run your tests
+
+Without configuration the daemon detects the verifier from the tree: a `Cargo.toml` runs `cargo test`, a Python project runs `python -m pytest`, a `package.json` runs `npm test`. Anything else is one config key away:
+
+```sh
+tessra config --set 'verifiers.tests.pass=make test'      # the command whose exit status becomes the tests.pass attestation
+tessra config --set 'verifiers.lint.clean=cargo clippy'   # any other kind works the same way
+tessra standard --require 'attest(lint.clean)'            # and a clause can gate on it
+tessra config --set verify_timeout_s=1200                 # bound a run; the default is 600
+```
+
+The command line is split on whitespace and run without a shell, in a scratch copy of the snapshot with a stripped environment and no keys, so put anything more involved in a script. `verify` runs each kind the standard still needs and records one attestation per kind. A whole-suite pass attests the snapshot and is cached by content and toolchain, so the same content is never verified twice; when every changed unit has a covering test, only those tests run.
+
 ### Bringing in your CI
 
 An external system becomes a verifier by attesting under a principal you grant it. The standard then consumes its attestations like any other:
@@ -241,6 +284,24 @@ The hook posts the event as JSON with a daemon signature in the `X-Tessra-Signat
 ```sh
 tessra --as ci attest --kind ci.pass --subject <snapshot> --result true
 ```
+
+### Putting a human in the loop
+
+A person is a principal whose key the daemon holds, reachable through a channel. When a landing needs an approval the standard requires, the daemon opens one request per revision, delivers it to every channel, and the reply is a key-signed attestation the agent never touches.
+
+```sh
+tessra grant --human maria                                                           # a principal that may only approve
+tessra channel --name oncall --kind inbox --path ~/tessra-inbox --principals maria   # or --kind webhook --url https://…
+tessra standard --when high --require 'approved(human, keysigned=true)'              # what needs her
+```
+
+A refused landing names the request and the reply command. `tessra query --kind exceptions` lists everything waiting on a person, and an inbox channel writes each request as a JSON file with the change, the unmet clauses, the risk factors, and any judges' reasoning. Maria answers with
+
+```sh
+tessra --as maria approve --request <id> --note "looks good"     # or --no
+```
+
+and the next `promote` lands. A split verdict among judges opens an exception the same way.
 
 ### Writing a hook
 
@@ -271,6 +332,120 @@ Events are `snapshot`, `proposed`, `landed`, `conflict.opened`, `released`, `dep
 | `agent(<name>, intent=<text>, budget=<ops>)` | Starts an agent through the runner set with `tessra config --set agent_runner=<command>`, scoped to the event's paths |
 
 Actions run with the hook's principal and nothing more. Every run is an op with its triggering event and outcome, so "why did this fire" and "why did it not" are queries. [PIPELINE.md](PIPELINE.md) and [HOOKS.md](HOOKS.md) argue the design; [DEVELOPING.md](DEVELOPING.md) has every option.
+
+## Reading the repository
+
+Every read is bounded by a token budget and every response reports what it used. These are the questions a person asks about what agents did.
+
+| Ask | Command |
+|---|---|
+| Where am I | `tessra status --pretty` |
+| What to know before touching a file, in 2000 tokens | `tessra context --path src/lib.rs --budget 2000` |
+| Everything about one unit: text, dependents, tests, memories, claims | `tessra context --unit src/lib.rs:parse --budget 3000` |
+| Who last changed each unit, and under which intent | `tessra query --kind blame --path src/lib.rs` |
+| Which tests cover each unit, and which units none | `tessra query --kind tests --path src/lib.rs` |
+| What the revision changed, unit by unit | `tessra query --kind diff --path src/lib.rs` |
+| What happened in the last hour | `tessra query --kind activity --window 1h --altitude summary` |
+| What is waiting on a person | `tessra query --kind exceptions` |
+| Memories about a path | `tessra query --kind memory --scope src` |
+| The first trunk revision where a test fails | `tessra query --kind bisect --test test_parse` |
+| The end of a verifier's output | `tessra query --kind object --id <evidence> --tail` |
+
+`--altitude` takes `summary`, `changes`, or `ops`; `--window` takes `30m`, `1h`, `2d`, and so on.
+
+## Running a swarm
+
+`plan` splits an intent into groups of units that share dependency edges, one group per agent, and records a sub-intent, a task, and a scoped, budgeted assignment for each. Agents read their assignment from `status`, claim their paths, and work in parallel; the frontier lands what meets the standard.
+
+```sh
+tessra plan --intent "add structured logging" --paths 'src/**' --agents 4 --ops 2000   # agent01..agent04, or --names
+tessra --agent agent01 status                                    # the assignment: intent, units, paths, op budget
+tessra --agent agent01 claim --paths src/log.rs --note "wrapping the writer"   # advisory; overlaps come back as a warning
+tessra promote --to landed --all                                 # the frontier, on demand
+tessra hook --name auto-land --on proposed --do 'land()'         # or continuous: proposing lands when the standard holds
+tessra revoke --name agent03                                     # containment: sessions, changes, claims, workspaces, one op
+```
+
+Claims never block a write. An agent claiming paths another holds is told who, what for, and that a merge is coming. To let an agent plan for others, give it a standing grant with `tessra grant --to planner --verbs plan --paths 'src/**' --delegable --ops 5000`; every capability it issues is contained in its own, and the daemon walks the chain back to you on every op.
+
+## Memory
+
+What is not in the code goes in the repository beside the code, as signed objects any agent can recall.
+
+```sh
+tessra remember --kind gotcha --body "the build needs GOFLAGS=-mod=mod" --scope-kind path --scope-ref backend
+tessra remember --kind decision --body "errors are values; no panics past the API boundary"     # repository-wide
+tessra remember --kind convention --body "tests live beside the unit they cover" --scope-kind path --scope-ref src
+tessra remember --kind gotcha --body "must stay pure, the verifier runs it" --scope-kind unit --scope-ref src/a.rs:one
+tessra remember --kind question --body "should retries be bounded?" --scope-kind intent --scope-ref <intent id>
+```
+
+Kinds are `gotcha`, `decision`, `convention`, `question`, and `fact`. Scopes are the repository, a path, a unit written as `path:name`, or an intent. `context` recalls the memories that apply to what you are about to touch, `query --kind memory --scope <path>` lists them, and `undo` takes back one you regret. For tools that do not speak Tessra, render shared memory as a file:
+
+```sh
+tessra export --format agents-md --path AGENTS.md    # or --format claude-md --path CLAUDE.md
+```
+
+The file is grouped by scope and headed by a note asking readers to record with `remember` rather than edit it.
+
+## Undoing and removing
+
+Three tools, three altitudes:
+
+```sh
+tessra undo                                   # your most recent op, or --op <id>; undoing a snapshot restores the workspace
+tessra revert --change <id> --reason "..."    # a landed change: a new landing undoes it unit by unit and opens a task
+tessra revoke --name <agent>                  # an agent: sessions, unlanded changes, claims, memories, workspaces, one op
+```
+
+`revert` refuses when later changes built on the units it would undo, and names them. Landed history is immutable; correction is always a new change.
+
+**Where the data is.** The tree holds only `.tessra/`: a format marker, the machine-local config, the daemon's port and pid, and one small file per workspace. The object store, the op log, the keys, and the materialized workspaces live outside the tree, and outside any cloud-synced folder:
+
+| | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\tessra\{stores,keys,workspaces}\<repo-id>\` |
+| macOS | `~/Library/Application Support/tessra/{stores,keys,workspaces}/<repo-id>/` |
+| Linux | `$XDG_DATA_HOME/tessra/{stores,keys,workspaces}/<repo-id>/` |
+
+`tessra init` prints the store and key paths, and `.tessra/store` holds the store path. A repository in OneDrive, Dropbox, or iCloud is fine; the store stays out of it.
+
+**Upgrading** is running the install one-liner again. The store format is versioned in `.tessra/TESSRA`, and a release that changes it will say so in its notes.
+
+**Removing Tessra** from a repository is deleting `.tessra/` and that repo id's directories above. Removing the tool is deleting the `tessra` binary from `~/.local/bin` and the installer's receipt under `~/.config/tessra-cli/`.
+
+## Configuration
+
+`tessra config` shows the machine-local configuration in `.tessra/config`; `--set key=value` changes it, owner only. A value that reads as `true`, `false`, or an integer is stored as one.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `verifiers.<kind>` | Command line whose exit status becomes an attestation of that kind; `tests.pass` is the one `verify` needs | detected from the tree |
+| `verify_timeout_s` | Seconds a verifier may run before it is stopped and attested as timed out | `600` |
+| `snapshot_state` | Capture build state on every snapshot, as `snapshot --with-state` does once | `false` |
+| `state_paths` | Comma-separated directories captured as state | `target,data,.venv,node_modules` |
+| `agent_runner` | Command a hook's `agent(…)` action starts, with `TESSRA_AGENT`, `TESSRA_INTENT`, `TESSRA_EVENT`, `TESSRA_REPO`, and `TESSRA_EXE` in its environment | unset |
+| `anomaly_throttle`, `anomaly_cooldown_s`, `anomaly_revoke` | Anomaly points at which an agent's mutations are refused, for how many seconds, and at which it is revoked and unwound | `3`, `60`, `6` |
+| `auto_revert` | Roll a target back when an observe clause trips | `true` |
+| `vault.<NAME>` | A secret handed to a deployer as `NAME`, in its environment only | unset |
+
+How much git history a checkout contributes is a flag, not a key: `tessra init --history N`, default 100.
+
+## Troubleshooting and FAQ
+
+**Every command talks to a daemon.** The first command in a repository starts one detached, listening on loopback; `.tessra/daemon` holds its port, a bearer token, and its pid, and it exits after thirty idle minutes. `tessra daemon --idle-minutes 30` runs one in the foreground, and `--no-daemon` on any command runs in-process instead, which is the first thing to try when something looks stuck. While a verifier runs, the daemon answers every request with `BUSY`, so code under test cannot act through it.
+
+**A refusal is data.** Every error carries a `code` and, where it applies, the `unmet` clauses and a `fix` you can run. `STANDARD_UNMET` names the clause and what would satisfy it, `BUSY` means a verifier is running, `SCOPE` means the session's capability does not cover that path or verb, and `GIT` means the bridge could not run `git`.
+
+**Does it need a server?** No. One daemon per repository, on your machine, over loopback. The hub and multi-machine sync are specified but not built.
+
+**Does it change my git repository?** No. It reads `.git/` at `init` and on `import`, and writes commits only on `export`. The store lives outside the tree.
+
+**Which languages get semantic merge?** Rust, Python, JavaScript, and TypeScript. Everything else merges as chunks, which still works but with coarser identity.
+
+**Is it safe to try on a real repository?** Yes. `init` is additive, nothing lands without the standard, every op is undoable, and walking away is deleting `.tessra/` and the store.
+
+**Which platforms are tested?** Windows 11 today. The macOS and Linux builds come from the same pipeline and have not been exercised there yet.
 
 ---
 
@@ -349,7 +524,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/tessra-cli    # installs the tessra binary from this checkout
 ```
 
-[DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the pull request rules, and [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
 
 ## License
 

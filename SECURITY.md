@@ -88,3 +88,7 @@ The daemon is the enforcement point. It verifies every signature and every capab
 ## What this replaces
 
 Commit signing, branch protection, CODEOWNERS as access control, CI secrets configuration, and the audit log bolted onto a forge. In Tessra these are consequences of principals, capabilities, and signed ops.
+
+## Reporting a vulnerability
+
+Report security issues privately through GitHub's [vulnerability reporting](https://github.com/NitrusAphalion/tessra/security/advisories/new) for this repository, not in a public issue. Include the command or input that triggers the problem and what it lets an agent or a principal do that the threat model above says it must not. You will get an acknowledgement, and a fix or an explanation, before anything is published.
