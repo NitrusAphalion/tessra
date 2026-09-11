@@ -4,6 +4,10 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.1 - 2026-09-10
+
 ### Added
 
 - README: a get-started guide, mechanism diagrams, a logo, and sections on standards and hooks, working alongside git, reading the repository, swarms, memory, undoing and removing, configuration, and troubleshooting.

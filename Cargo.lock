@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "serde_json",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "ciborium",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "ciborium",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-oplog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ciborium",
  "serde",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-semantic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tessra-core",
  "thiserror",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "tessra-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "redb",
