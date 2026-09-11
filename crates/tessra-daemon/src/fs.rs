@@ -77,9 +77,15 @@ fn unportable(name: &str) -> bool {
 }
 
 /// A small secrets scanner. No regex crate; a handful of high-signal shapes.
+///
+/// The PEM needles are assembled at compile time so that this file never
+/// contains them verbatim: the repository is developed under Tessra, and the
+/// scanner must not flag its own source. What it detects is unchanged.
 fn scan_secrets(text: &str) -> Vec<String> {
+    const PEM_HEAD: &str = concat!("-----BEG", "IN");
+    const PEM_TAIL: &str = concat!("PRIVATE K", "EY-----");
     let mut hits = Vec::new();
-    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----") {
+    if text.contains(PEM_HEAD) && text.contains(PEM_TAIL) {
         hits.push("private-key-block".into());
     }
     let alnum = |c: char| c.is_ascii_alphanumeric();
@@ -585,7 +591,8 @@ mod tests {
         std::fs::write(root.join(".git/HEAD"), "ref: x").unwrap();
         std::fs::write(root.join("src/a.rs"), "fn a() {}\r\n").unwrap();
         std::fs::write(root.join("README.md"), "# hi\n").unwrap();
-        std::fs::write(root.join("secret.txt"), "AKIAABCDEFGHIJKLMNOP is a key").unwrap();
+        // Built at run time so this source file does not itself look like a key.
+        std::fs::write(root.join("secret.txt"), format!("{}ABCDEFGHIJKLMNOP is a key", "AKIA")).unwrap();
         std::fs::write(root.join("con.txt"), "reserved").unwrap();
         std::fs::write(root.join("ignored.log"), "x").unwrap();
         let mut rules = TrackingRules::default();
