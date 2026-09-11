@@ -22,7 +22,7 @@ A session working a bug:
 ## Changes
 
 1. Fork and branch. `main` is protected: changes land through a pull request, and every commit must carry a verified signature, so set up [commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) before you start.
-2. Build and test with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`; the repository's standard refuses to land a change with a clippy warning. [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb, and the daemon.
+2. Format with `cargo fmt --all`, then build and test with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`; the repository's standard refuses to land a change with a clippy warning or an unformatted file. [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb, and the daemon.
 3. Keep the spec honest. When a design document and [spec/](spec/README.md) disagree, the spec wins and the document gets fixed, so a change in behavior comes with the matching change in the spec or its deviations list.
 4. Note user-visible changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). The release pipeline uses that section for the release notes.
 5. Open the pull request. Say what changed, why, and how you verified it.

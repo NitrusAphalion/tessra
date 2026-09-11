@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use ciborium::value::Value as Cbor;
+use serde_json::{json, Value as Json};
 use tessra_core::cbor;
 use tessra_core::object::{Effect, Hook, HookAction, Memory, MemoryScope, Predicate, Revision};
 use tessra_core::store::ObjectStore;
@@ -25,7 +26,6 @@ use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
 use tessra_oplog::glob;
 use tessra_oplog::view::ViewState;
-use serde_json::{json, Value as Json};
 
 use crate::tree;
 use crate::{now, Error, Repo, Result};
@@ -45,7 +45,13 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn new(repo: &Repo, kind: &str, rev_id: ObjectId, rev: &Revision, extra: Json) -> Result<Event> {
+    pub fn new(
+        repo: &Repo,
+        kind: &str,
+        rev_id: ObjectId,
+        rev: &Revision,
+        extra: Json,
+    ) -> Result<Event> {
         let snapshot = rev
             .snapshots
             .get("")
@@ -116,14 +122,21 @@ pub fn all_hooks(repo: &Repo) -> Result<Vec<(EntityId, ObjectId, Hook)>> {
     let mut out = Vec::new();
     for (id, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Some(bytes) = repo.store().get_bytes(&oid)? else { continue };
+        let Some(bytes) = repo.store().get_bytes(&oid)? else {
+            continue;
+        };
         if cbor::peek_tag(&bytes).ok().as_deref() == Some("hook") {
             if let Ok(h) = cbor::decode::<Hook>(&bytes) {
                 out.push((id, oid, h));
             }
         }
     }
-    out.sort_by(|a, b| a.2.order.unwrap_or(0).cmp(&b.2.order.unwrap_or(0)).then(a.2.name.cmp(&b.2.name)));
+    out.sort_by(|a, b| {
+        a.2.order
+            .unwrap_or(0)
+            .cmp(&b.2.order.unwrap_or(0))
+            .then(a.2.name.cmp(&b.2.name))
+    });
     Ok(out)
 }
 
@@ -209,10 +222,15 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
                 ("X-Tessra-Event".to_string(), event.kind.clone()),
                 ("X-Tessra-Hook".to_string(), hook.name.clone()),
                 ("X-Tessra-Principal".to_string(), repo.daemon.to_letters()),
-                ("X-Tessra-Signature".to_string(), format!("ed25519:{}", hex::encode(sig))),
+                (
+                    "X-Tessra-Signature".to_string(),
+                    format!("ed25519:{}", hex::encode(sig)),
+                ),
             ];
             let (status, resp) = http_post(&url, &headers, &body, Duration::from_secs(10))?;
-            Ok(json!({ "url": url, "status": status, "response": String::from_utf8_lossy(&resp[..resp.len().min(400)]) }))
+            Ok(
+                json!({ "url": url, "status": status, "response": String::from_utf8_lossy(&resp[..resp.len().min(400)]) }),
+            )
         }
         "run" => {
             let cmd = arg_text(action, "cmd")
@@ -225,7 +243,10 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             let mut c = crate::quiet(Command::new(&argv[0]));
             c.args(&argv[1..]);
             c.current_dir(&repo.root);
-            c.env("TESSRA_EVENT", serde_json::to_string(&payload).unwrap_or_default());
+            c.env(
+                "TESSRA_EVENT",
+                serde_json::to_string(&payload).unwrap_or_default(),
+            );
             c.env("TESSRA_REPO", repo.root.display().to_string());
             c.stdin(Stdio::piped());
             c.stdout(Stdio::piped());
@@ -251,14 +272,24 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             if let Some(mut s) = child.stdout.take() {
                 let _ = s.read_to_string(&mut out);
             }
-            Ok(json!({ "exit": status.code(), "output": out.chars().take(400).collect::<String>() }))
+            Ok(
+                json!({ "exit": status.code(), "output": out.chars().take(400).collect::<String>() }),
+            )
         }
         "land" => {
             // The continuous frontier: land the event's revision now if the
             // standard holds. Runs as the coordinator.
             let rev: Revision = repo.store().get(&event.revision)?;
-            let Some(ws) = repo.workspaces.iter().find(|w| w.current == Some(event.revision)).cloned() else {
-                return Err(Error::verb("HOOK", "no workspace holds the revision to land"));
+            let Some(ws) = repo
+                .workspaces
+                .iter()
+                .find(|w| w.current == Some(event.revision))
+                .cloned()
+            else {
+                return Err(Error::verb(
+                    "HOOK",
+                    "no workspace holds the revision to land",
+                ));
             };
             let mut actor = repo.daemon_actor();
             match crate::verbs::land_revision(repo, &mut actor, &ws, event.revision, &rev) {
@@ -275,8 +306,10 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             // an assignment scoped to the event's paths, then starts the
             // configured agent runner detached, with the event in its
             // environment. The runner speaks to the daemon like any agent.
-            let name = arg_text(action, "name").ok_or_else(|| Error::verb("HOOK", "agent needs a name"))?;
-            let intent_title = arg_text(action, "intent").unwrap_or_else(|| format!("{} {}", event.kind, event.title));
+            let name = arg_text(action, "name")
+                .ok_or_else(|| Error::verb("HOOK", "agent needs a name"))?;
+            let intent_title = arg_text(action, "intent")
+                .unwrap_or_else(|| format!("{} {}", event.kind, event.title));
             let budget: u64 = action
                 .args
                 .get("budget")
@@ -313,7 +346,11 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
                     kind: "intent".into(),
                     r#ref: Cbor::Bytes(intent.id.0.to_vec()),
                 },
-                body: format!("{name}: {intent_title} (from {} on change {})", event.kind, event.change.to_letters()),
+                body: format!(
+                    "{name}: {intent_title} (from {} on change {})",
+                    event.kind,
+                    event.change.to_letters()
+                ),
                 anchor: None,
                 confidence: 1000,
                 author: hook.r#as,
@@ -334,24 +371,43 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
                 build::args_with_idem(EntityId::random().0, BTreeMap::new()),
                 vec![
                     Effect::Put { id: intent_oid },
-                    Effect::Point { entity: intent.id, to: intent_oid, from: None },
+                    Effect::Point {
+                        entity: intent.id,
+                        to: intent_oid,
+                        from: None,
+                    },
                     Effect::Put { id: task_oid },
-                    Effect::Point { entity: task.id, to: task_oid, from: None },
+                    Effect::Point {
+                        entity: task.id,
+                        to: task_oid,
+                        from: None,
+                    },
                 ],
                 t,
             )?;
             repo.commit_op(&op)?;
-            crate::swarm::save_assignment(repo, &crate::swarm::Assignment {
-                agent: agent_id,
-                intent: intent.id,
-                title: intent_title.clone(),
-                paths: if event.paths.is_empty() { vec!["**".into()] } else { event.paths.clone() },
-                units: vec![],
-                ops: budget,
-            })?;
+            crate::swarm::save_assignment(
+                repo,
+                &crate::swarm::Assignment {
+                    agent: agent_id,
+                    intent: intent.id,
+                    title: intent_title.clone(),
+                    paths: if event.paths.is_empty() {
+                        vec!["**".into()]
+                    } else {
+                        event.paths.clone()
+                    },
+                    units: vec![],
+                    ops: budget,
+                },
+            )?;
             let runner = match repo.config().get("agent_runner") {
                 Some(Cbor::Text(r)) if !r.trim().is_empty() => r.clone(),
-                _ => return Ok(json!({ "agent": name, "intent": intent.id.to_letters(), "spawned": false, "why": "no agent_runner configured; set it with tessra config --set agent_runner=<command>" })),
+                _ => {
+                    return Ok(
+                        json!({ "agent": name, "intent": intent.id.to_letters(), "spawned": false, "why": "no agent_runner configured; set it with tessra config --set agent_runner=<command>" }),
+                    )
+                }
             };
             let argv: Vec<String> = runner.split_whitespace().map(str::to_string).collect();
             let log_dir = crate::paths::workspaces_dir_for(&repo.repo_id).join("agents");
@@ -364,7 +420,10 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             c.env("TESSRA_AGENT", &name);
             c.env("TESSRA_INTENT", intent.id.to_letters());
             c.env("TESSRA_INTENT_TITLE", &intent_title);
-            c.env("TESSRA_EVENT", serde_json::to_string(&payload).unwrap_or_default());
+            c.env(
+                "TESSRA_EVENT",
+                serde_json::to_string(&payload).unwrap_or_default(),
+            );
             c.env("TESSRA_REPO", repo.root.display().to_string());
             if let Ok(exe) = std::env::current_exe() {
                 c.env("TESSRA_EXE", exe.display().to_string());
@@ -372,8 +431,15 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             c.stdin(Stdio::null());
             c.stdout(Stdio::from(log));
             c.stderr(Stdio::from(err));
-            let child = c.spawn().map_err(|e| Error::verb("HOOK", format!("cannot start agent runner {}: {e}", argv[0])))?;
-            Ok(json!({ "agent": name, "intent": intent.id.to_letters(), "task": task.id.to_letters(), "spawned": true, "pid": child.id(), "log": log_dir.display().to_string() }))
+            let child = c.spawn().map_err(|e| {
+                Error::verb(
+                    "HOOK",
+                    format!("cannot start agent runner {}: {e}", argv[0]),
+                )
+            })?;
+            Ok(
+                json!({ "agent": name, "intent": intent.id.to_letters(), "task": task.id.to_letters(), "spawned": true, "pid": child.id(), "log": log_dir.display().to_string() }),
+            )
         }
         "verify" => {
             let rev: Revision = repo.store().get(&event.revision)?;
@@ -393,7 +459,10 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
                 &kind,
                 Some((event.revision.as_bytes().as_slice(), "revision")),
                 None,
-                Some(BTreeMap::from([("hook".to_string(), Cbor::Text(hook.name.clone()))])),
+                Some(BTreeMap::from([(
+                    "hook".to_string(),
+                    Cbor::Text(hook.name.clone()),
+                )])),
                 result,
                 None,
                 hook.r#as,
@@ -403,7 +472,8 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
         }
         "notify" => {
             let channel = arg_text(action, "channel").or_else(|| arg_text(action, "name"));
-            let text = arg_text(action, "text").unwrap_or_else(|| format!("{}: {}", event.kind, event.title));
+            let text = arg_text(action, "text")
+                .unwrap_or_else(|| format!("{}: {}", event.kind, event.title));
             let mut message = payload.clone();
             message["text"] = json!(text);
             let delivered = crate::verbs::deliver_to_channels(repo, &message, channel.as_deref())?;
@@ -412,7 +482,14 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
         "remember" | "task" => {
             let body = arg_text(action, "body")
                 .or_else(|| arg_text(action, "name"))
-                .unwrap_or_else(|| format!("{} {}: {}", event.kind, event.change.to_letters(), event.title));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} {}: {}",
+                        event.kind,
+                        event.change.to_letters(),
+                        event.title
+                    )
+                });
             let kind = arg_text(action, "kind").unwrap_or_else(|| "task".into());
             let m = Memory {
                 id: EntityId::random(),
@@ -454,13 +531,21 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             repo.commit_op(&op)?;
             Ok(json!({ "memory": m.id.to_letters() }))
         }
-        other => Err(Error::verb("HOOK", format!("action {other} is not available yet"))),
+        other => Err(Error::verb(
+            "HOOK",
+            format!("action {other} is not available yet"),
+        )),
     }
 }
 
 /// A minimal HTTP/1.1 POST over plain TCP. `https` is not supported here;
 /// a `run` action with curl covers it until a TLS client is wired in.
-pub fn http_post(url: &str, headers: &[(String, String)], body: &[u8], timeout: Duration) -> Result<(u16, Vec<u8>)> {
+pub fn http_post(
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>)> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| Error::verb("HOOK", "webhook url must start with http://"))?;
@@ -482,7 +567,10 @@ pub fn http_post(url: &str, headers: &[(String, String)], body: &[u8], timeout: 
         .map_err(|e| Error::verb("HOOK", format!("connect {hostport}: {e}")))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let mut req = format!("POST {path} HTTP/1.1\r\nHost: {hostport}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -573,6 +661,9 @@ mod tests {
         assert!(!where_matches(&q, &ev));
         let a = parse_action("webhook(http://127.0.0.1:9/ci)").unwrap();
         assert_eq!(a.kind, "webhook");
-        assert_eq!(arg_text(&a, "name").as_deref(), Some("http://127.0.0.1:9/ci"));
+        assert_eq!(
+            arg_text(&a, "name").as_deref(),
+            Some("http://127.0.0.1:9/ci")
+        );
     }
 }

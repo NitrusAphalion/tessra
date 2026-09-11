@@ -436,14 +436,20 @@ pub fn materialize<S: ObjectStore>(
     let files: Vec<(PathBuf, ObjectId, bool)> = flat
         .iter()
         .filter(|(_, l)| l.kind == EntryKind::File)
-        .filter_map(|(p, l)| l.r#ref.map(|id| (dir.join(p), id, l.mode.unwrap_or(0) & 1 == 1)))
+        .filter_map(|(p, l)| {
+            l.r#ref
+                .map(|id| (dir.join(p), id, l.mode.unwrap_or(0) & 1 == 1))
+        })
         .collect();
     for (full, _, _) in &files {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
     let chunk = files.len().div_ceil(workers).max(1);
     let mut n = std::thread::scope(|scope| -> Result<usize> {
         let mut handles = Vec::new();
@@ -465,7 +471,9 @@ pub fn materialize<S: ObjectStore>(
         }
         let mut total = 0;
         for h in handles {
-            total += h.join().map_err(|_| crate::Error::verb("MATERIALIZE", "a writer thread panicked"))??;
+            total += h
+                .join()
+                .map_err(|_| crate::Error::verb("MATERIALIZE", "a writer thread panicked"))??;
         }
         Ok(total)
     })?;
@@ -493,7 +501,11 @@ pub fn materialize<S: ObjectStore>(
                 let art: tessra_core::object::Artifact = store.get(&id)?;
                 let mut out = Vec::with_capacity(art.size as usize);
                 for c in &art.chunks {
-                    out.extend(store.get_bytes(c)?.ok_or(tessra_core::Error::NotFound(*c))?);
+                    out.extend(
+                        store
+                            .get_bytes(c)?
+                            .ok_or(tessra_core::Error::NotFound(*c))?,
+                    );
                 }
                 std::fs::write(&full, out)?;
                 n += 1;
@@ -592,7 +604,11 @@ mod tests {
         std::fs::write(root.join("src/a.rs"), "fn a() {}\r\n").unwrap();
         std::fs::write(root.join("README.md"), "# hi\n").unwrap();
         // Built at run time so this source file does not itself look like a key.
-        std::fs::write(root.join("secret.txt"), format!("{}ABCDEFGHIJKLMNOP is a key", "AKIA")).unwrap();
+        std::fs::write(
+            root.join("secret.txt"),
+            format!("{}ABCDEFGHIJKLMNOP is a key", "AKIA"),
+        )
+        .unwrap();
         std::fs::write(root.join("con.txt"), "reserved").unwrap();
         std::fs::write(root.join("ignored.log"), "x").unwrap();
         let mut rules = TrackingRules::default();

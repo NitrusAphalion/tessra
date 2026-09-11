@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use tessra_daemon::client;
 use tessra_daemon::server::{self, Endpoint, Request};
 use tessra_daemon::{verbs, InitOptions, Repo};
-use serde_json::{json, Value};
 
 #[derive(Parser)]
 #[command(name = "tessra", version, about = "Version control for the era of AI")]
@@ -604,7 +604,10 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
     match cmd {
         Cmd::Init { .. } | Cmd::Mcp | Cmd::Daemon { .. } => ("status", json!({})),
         Cmd::Status { since } => ("status", json!({ "since": since })),
-        Cmd::Context { unit, path, budget } => ("context", json!({ "unit": unit, "path": path, "budget": budget })),
+        Cmd::Context { unit, path, budget } => (
+            "context",
+            json!({ "unit": unit, "path": path, "budget": budget }),
+        ),
         Cmd::Query {
             kind,
             scope,
@@ -648,10 +651,25 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
             "edit",
             json!({ "path": path, "content": content, "old": old, "new": new, "all": all, "rename": rename, "to": to, "delete": delete, "resolve": resolve }),
         ),
-        Cmd::Export { branch, push, format, path } => ("export", json!({ "format": format, "path": path, "branch": branch, "push": push })),
+        Cmd::Export {
+            branch,
+            push,
+            format,
+            path,
+        } => (
+            "export",
+            json!({ "format": format, "path": path, "branch": branch, "push": push }),
+        ),
         Cmd::Import { branch } => ("import", json!({ "branch": branch })),
         Cmd::Bench => ("bench", json!({})),
-        Cmd::Snapshot { title, then, with_state } => ("snapshot", json!({ "title": title, "then": then, "with_state": with_state })),
+        Cmd::Snapshot {
+            title,
+            then,
+            with_state,
+        } => (
+            "snapshot",
+            json!({ "title": title, "then": then, "with_state": with_state }),
+        ),
         Cmd::Claim {
             action,
             paths,
@@ -674,29 +692,65 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
             json!({ "kind": kind, "body": body, "scope": { "kind": scope_kind, "ref": scope_ref }, "confidence": confidence, "visibility": visibility }),
         ),
         Cmd::Verify { kinds, full } => ("verify", json!({ "kinds": kinds, "full": full })),
-        Cmd::Standard { require, forbid, remove, when, target } => (
+        Cmd::Standard {
+            require,
+            forbid,
+            remove,
+            when,
+            target,
+        } => (
             "standard",
             json!({ "require": require, "forbid": forbid, "remove": remove, "when": when, "target": target }),
         ),
-        Cmd::Hook { name, on, where_, do_, disable, enable } => (
+        Cmd::Hook {
+            name,
+            on,
+            where_,
+            do_,
+            disable,
+            enable,
+        } => (
             "hook",
             json!({ "name": name, "on": on, "where": where_, "do": do_, "enable": if *disable { Some(false) } else if *enable { Some(true) } else { None } }),
         ),
-        Cmd::Grant { external, human, to, verbs, paths, delegable, ops } => (
+        Cmd::Grant {
+            external,
+            human,
+            to,
+            verbs,
+            paths,
+            delegable,
+            ops,
+        } => (
             "grant",
             json!({ "external": external, "human": human, "to": to, "verbs": verbs, "paths": paths, "delegable": delegable, "ops": ops }),
         ),
-        Cmd::Plan { intent, paths, agents, names, ops } => (
+        Cmd::Plan {
+            intent,
+            paths,
+            agents,
+            names,
+            ops,
+        } => (
             "plan",
             json!({ "intent": intent, "paths": paths, "agents": agents, "names": names, "ops": ops }),
         ),
         Cmd::Revoke { name } => ("revoke", json!({ "name": name })),
         Cmd::Config { set } => ("config", json!({ "set": set })),
-        Cmd::Attest { kind, subject, result, evidence } => (
+        Cmd::Attest {
+            kind,
+            subject,
+            result,
+            evidence,
+        } => (
             "attest",
             json!({ "kind": kind, "subject": subject, "result": result, "evidence": evidence }),
         ),
-        Cmd::Try { candidates, candidates_file, keep } => {
+        Cmd::Try {
+            candidates,
+            candidates_file,
+            keep,
+        } => {
             let text = match (candidates, candidates_file) {
                 (Some(t), _) => t.clone(),
                 (None, Some(p)) => std::fs::read_to_string(p).unwrap_or_default(),
@@ -705,14 +759,38 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
             let cands: Value = serde_json::from_str(&text).unwrap_or(Value::Array(vec![]));
             ("try", json!({ "candidates": cands, "keep": keep }))
         }
-        Cmd::Approve { request, no, note } => ("approve", json!({ "request": request, "no": no, "note": note })),
-        Cmd::Channel { name, kind, path, url, principals } => (
+        Cmd::Approve { request, no, note } => (
+            "approve",
+            json!({ "request": request, "no": no, "note": note }),
+        ),
+        Cmd::Channel {
+            name,
+            kind,
+            path,
+            url,
+            principals,
+        } => (
             "channel",
             json!({ "name": name, "kind": kind, "path": path, "url": url, "principals": principals }),
         ),
-        Cmd::Promote { all, to, slice } => ("promote", json!({ "all": all, "to": to, "slice": slice })),
-        Cmd::Revert { change, target, reason } => ("revert", json!({ "change": change, "target": target, "reason": reason })),
-        Cmd::Target { name, deployer, observers, canary, secrets } => (
+        Cmd::Promote { all, to, slice } => {
+            ("promote", json!({ "all": all, "to": to, "slice": slice }))
+        }
+        Cmd::Revert {
+            change,
+            target,
+            reason,
+        } => (
+            "revert",
+            json!({ "change": change, "target": target, "reason": reason }),
+        ),
+        Cmd::Target {
+            name,
+            deployer,
+            observers,
+            canary,
+            secrets,
+        } => (
             "target",
             json!({ "name": name, "deployer": deployer, "observers": observers, "canary": canary, "secrets": secrets }),
         ),

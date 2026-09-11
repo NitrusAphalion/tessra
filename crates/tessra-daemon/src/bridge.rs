@@ -10,11 +10,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde_json::{json, Value as Json};
 use tessra_core::object::{EntryKind, Revision, Snapshot};
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
-use serde_json::{json, Value as Json};
 
 use crate::gitimport;
 use crate::principals::Actor;
@@ -55,7 +55,8 @@ pub fn commit_of(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Optio
 
 fn remember(repo: &Repo, rev_id: &ObjectId, commit: &str) -> Result<()> {
     repo.store().set_meta(&rev_key(rev_id), commit.as_bytes())?;
-    repo.store().set_meta(&commit_key(commit), rev_id.as_bytes())?;
+    repo.store()
+        .set_meta(&commit_key(commit), rev_id.as_bytes())?;
     Ok(())
 }
 
@@ -85,7 +86,9 @@ fn follow_checkout(repo: &mut Repo, work: &Path) -> Result<Json> {
     let view = repo.log.current_view()?;
     let landed = tessra_oplog::verify::landed_revisions(repo.store(), &view)?;
     if !landed.contains(&at) {
-        return Ok(json!({ "workspace": "left alone", "why": "it carries unlanded work", "revision": at.to_hex() }));
+        return Ok(
+            json!({ "workspace": "left alone", "why": "it carries unlanded work", "revision": at.to_hex() }),
+        );
     }
     let mut ws = ws;
     ws.base = rev_id;
@@ -97,16 +100,27 @@ fn follow_checkout(repo: &mut Repo, work: &Path) -> Result<Json> {
     Ok(json!({ "workspace": "followed", "revision": rev_id.to_hex() }))
 }
 
-fn git_out(dir: &Path, envs: &[(&str, String)], args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
+fn git_out(
+    dir: &Path,
+    envs: &[(&str, String)],
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<String> {
     let mut c = crate::quiet(Command::new("git"));
     c.arg("-C").arg(plain(dir)).args(args);
     for (k, v) in envs {
         c.env(k, v);
     }
-    c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    c.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     c.stdout(Stdio::piped());
     c.stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(|e| Error::Git(format!("running git: {e}")))?;
+    let mut child = c
+        .spawn()
+        .map_err(|e| Error::Git(format!("running git: {e}")))?;
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
         si.write_all(data)?;
     }
@@ -147,32 +161,69 @@ fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> R
         .ok_or_else(|| Error::verb("ROOT", "revision has no root snapshot"))?;
     let snap: Snapshot = repo.store().get(snap_id)?;
     let flat = tree::flatten(repo.store(), &snap.root)?;
-    let scratch = crate::verifiers::materialize_scratch(repo, &snap.root, &format!("export-{}", &snap_id.to_hex()[..12]))?;
+    let scratch = crate::verifiers::materialize_scratch(
+        repo,
+        &snap.root,
+        &format!("export-{}", &snap_id.to_hex()[..12]),
+    )?;
     let index = work.join(format!("tessra-index-{}", &snap_id.to_hex()[..12]));
     let _ = std::fs::remove_file(&index);
-    let envs = [("GIT_INDEX_FILE", plain(&index)), ("GIT_DIR", plain(git_dir))];
+    let envs = [
+        ("GIT_INDEX_FILE", plain(&index)),
+        ("GIT_DIR", plain(git_dir)),
+    ];
     let envs_ref: Vec<(&str, String)> = envs.iter().map(|(k, v)| (*k, v.clone())).collect();
     // Blobs, in one call, paths relative to the scratch tree.
-    let mut paths: Vec<&String> = flat.iter().filter(|(_, l)| l.kind == EntryKind::File).map(|(p, _)| p).collect();
+    let mut paths: Vec<&String> = flat
+        .iter()
+        .filter(|(_, l)| l.kind == EntryKind::File)
+        .map(|(p, _)| p)
+        .collect();
     paths.sort();
     let mut info = String::new();
     if !paths.is_empty() {
-        let listing = paths.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n");
-        let hashes = git_out(&scratch, &envs_ref, &["hash-object", "-w", "--stdin-paths"], Some(listing.as_bytes()))?;
+        let listing = paths
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hashes = git_out(
+            &scratch,
+            &envs_ref,
+            &["hash-object", "-w", "--stdin-paths"],
+            Some(listing.as_bytes()),
+        )?;
         for (p, h) in paths.iter().zip(hashes.lines()) {
-            let mode = if flat.get(*p).and_then(|l| l.mode).unwrap_or(0) & 1 == 1 { "100755" } else { "100644" };
+            let mode = if flat.get(*p).and_then(|l| l.mode).unwrap_or(0) & 1 == 1 {
+                "100755"
+            } else {
+                "100644"
+            };
             info.push_str(&format!("{mode} {h}\t{p}\n"));
         }
     }
     for (p, l) in flat.iter().filter(|(_, l)| l.kind == EntryKind::Symlink) {
-        if let Some(target) = l.r#ref.and_then(|r| repo.store().get_bytes(&r).ok().flatten()) {
-            let h = git_out(&scratch, &envs_ref, &["hash-object", "-w", "--stdin"], Some(&target))?;
+        if let Some(target) = l
+            .r#ref
+            .and_then(|r| repo.store().get_bytes(&r).ok().flatten())
+        {
+            let h = git_out(
+                &scratch,
+                &envs_ref,
+                &["hash-object", "-w", "--stdin"],
+                Some(&target),
+            )?;
             info.push_str(&format!("120000 {h}\t{p}\n"));
         }
     }
     git_out(&scratch, &envs_ref, &["read-tree", "--empty"], None)?;
     if !info.is_empty() {
-        git_out(&scratch, &envs_ref, &["update-index", "--add", "--index-info"], Some(info.as_bytes()))?;
+        git_out(
+            &scratch,
+            &envs_ref,
+            &["update-index", "--add", "--index-info"],
+            Some(info.as_bytes()),
+        )?;
     }
     let tree_id = git_out(&scratch, &envs_ref, &["write-tree"], None)?;
     let _ = std::fs::remove_file(&index);
@@ -184,9 +235,19 @@ fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> R
 /// becomes one commit on top of the newest revision that has, authored by
 /// the change's author, in trunk order. Nothing already exported or
 /// imported is rewritten.
-pub fn export_git(repo: &mut Repo, branch: &str, dir: Option<PathBuf>, push: Option<&str>) -> Result<Json> {
+pub fn export_git(
+    repo: &mut Repo,
+    branch: &str,
+    dir: Option<PathBuf>,
+    push: Option<&str>,
+) -> Result<Json> {
     let work = dir.unwrap_or_else(|| repo.root.clone());
-    let git_dir = PathBuf::from(git_out(&work, &[], &["rev-parse", "--absolute-git-dir"], None)?);
+    let git_dir = PathBuf::from(git_out(
+        &work,
+        &[],
+        &["rev-parse", "--absolute-git-dir"],
+        None,
+    )?);
     let chain = trunk_chain(repo)?;
     // The newest revision that already is a commit.
     let mut parent: Option<String> = None;
@@ -200,20 +261,29 @@ pub fn export_git(repo: &mut Repo, branch: &str, dir: Option<PathBuf>, push: Opt
     let mut created = Vec::new();
     for (id, r) in chain.iter().skip(start) {
         let tree_id = write_git_tree(repo, &git_dir, &work, r)?;
-        let author_name = repo.principal_name(&r.author).unwrap_or_else(|| "tessra".into());
+        let author_name = repo
+            .principal_name(&r.author)
+            .unwrap_or_else(|| "tessra".into());
         let secs = r.time / 1_000_000_000;
         let message = format!(
             "{}\n\n{}{}Tessra-Change: {}\nTessra-Revision: {}\n",
             r.title,
             r.body.clone().unwrap_or_default(),
-            if r.body.as_ref().is_some_and(|b| !b.is_empty()) { "\n\n" } else { "" },
+            if r.body.as_ref().is_some_and(|b| !b.is_empty()) {
+                "\n\n"
+            } else {
+                ""
+            },
             r.id.to_letters(),
             id.to_hex()
         );
         let envs: Vec<(&str, String)> = vec![
             ("GIT_DIR", plain(&git_dir)),
             ("GIT_AUTHOR_NAME", author_name.clone()),
-            ("GIT_AUTHOR_EMAIL", format!("{}@tessra.local", author_name.replace(' ', "."))),
+            (
+                "GIT_AUTHOR_EMAIL",
+                format!("{}@tessra.local", author_name.replace(' ', ".")),
+            ),
             ("GIT_AUTHOR_DATE", format!("{secs} +0000")),
             ("GIT_COMMITTER_NAME", "tessra".into()),
             ("GIT_COMMITTER_EMAIL", "tessra@tessra.local".into()),
@@ -239,12 +309,18 @@ pub fn export_git(repo: &mut Repo, branch: &str, dir: Option<PathBuf>, push: Opt
     // Whether the checkout of that branch is clean is judged before the ref
     // moves under it: afterwards git reports the new commits' files as
     // changes, and every export would leave the checkout behind.
-    let current = git_out(&work, &[], &["rev-parse", "--abbrev-ref", "HEAD"], None).unwrap_or_default();
+    let current =
+        git_out(&work, &[], &["rev-parse", "--abbrev-ref", "HEAD"], None).unwrap_or_default();
     let was_clean = current == branch
-        && git_out(&work, &[], &["status", "--porcelain", "--untracked-files=no"], None)
-            .unwrap_or_default()
-            .trim()
-            .is_empty();
+        && git_out(
+            &work,
+            &[],
+            &["status", "--porcelain", "--untracked-files=no"],
+            None,
+        )
+        .unwrap_or_default()
+        .trim()
+        .is_empty();
     git_out(&work, &[], &["update-ref", &refname, &tip], None)?;
     // A clean checkout of that branch follows it; a dirty one is left alone.
     let checkout = if current != branch {
@@ -256,9 +332,14 @@ pub fn export_git(repo: &mut Repo, branch: &str, dir: Option<PathBuf>, push: Opt
         "dirty, not touched"
     };
     let pushed = push.map(|remote| {
-        git_out(&work, &[], &["push", remote, &format!("{tip}:{refname}")], None)
-            .map(|_| json!({ "remote": remote, "ok": true }))
-            .unwrap_or_else(|e| json!({ "remote": remote, "ok": false, "error": e.to_string() }))
+        git_out(
+            &work,
+            &[],
+            &["push", remote, &format!("{tip}:{refname}")],
+            None,
+        )
+        .map(|_| json!({ "remote": remote, "ok": true }))
+        .unwrap_or_else(|e| json!({ "remote": remote, "ok": false, "error": e.to_string() }))
     });
     // The checkout that was reset is the colocated workspace's: it follows.
     let is_root = std::fs::canonicalize(&work).ok().as_ref() == Some(&repo.root);
@@ -278,7 +359,12 @@ pub fn export_git(repo: &mut Repo, branch: &str, dir: Option<PathBuf>, push: Opt
 /// the commit's parent is the head, a merge otherwise.
 pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Json> {
     let work = repo.root.clone();
-    let tip = git_out(&work, &[], &["rev-parse", &format!("refs/heads/{branch}")], None)?;
+    let tip = git_out(
+        &work,
+        &[],
+        &["rev-parse", &format!("refs/heads/{branch}")],
+        None,
+    )?;
     // The newest trunk revision with a commit is where we start.
     let chain = trunk_chain(repo)?;
     let mut known: Option<String> = None;
@@ -291,8 +377,17 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         Some(k) => format!("{k}..{tip}"),
         None => tip.clone(),
     };
-    let listing = git_out(&work, &[], &["rev-list", "--first-parent", "--reverse", &range], None)?;
-    let commits: Vec<String> = listing.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let listing = git_out(
+        &work,
+        &[],
+        &["rev-list", "--first-parent", "--reverse", &range],
+        None,
+    )?;
+    let commits: Vec<String> = listing
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
     let mut imported = Vec::new();
     let mut blob_cache: HashMap<String, (ObjectId, bool)> = HashMap::new();
     let mut rules_id: Option<ObjectId> = None;
@@ -301,7 +396,13 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
             continue;
         }
         repo.store().begin_batch();
-        let content = gitimport::content_for_commit(repo.store(), &work, commit, &mut blob_cache, &mut rules_id);
+        let content = gitimport::content_for_commit(
+            repo.store(),
+            &work,
+            commit,
+            &mut blob_cache,
+            &mut rules_id,
+        );
         repo.store().end_batch()?;
         let content = content?;
         let (head_id, _) = crate::verbs::trunk_head_of(repo)?;
@@ -319,13 +420,32 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
             flags: None,
         };
         let rev_id = repo.store().put(&rev)?;
-        let mut effects = vec![tessra_core::object::Effect::Put { id: rev_id }, tessra_core::object::Effect::Point { entity: rev.id, to: rev_id, from: None }];
+        let mut effects = vec![
+            tessra_core::object::Effect::Put { id: rev_id },
+            tessra_core::object::Effect::Point {
+                entity: rev.id,
+                to: rev_id,
+                from: None,
+            },
+        ];
         if let Some(intent) = &content.intent {
             let ioid = repo.store().put(intent)?;
             effects.push(tessra_core::object::Effect::Put { id: ioid });
-            effects.push(tessra_core::object::Effect::Point { entity: intent.id, to: ioid, from: None });
+            effects.push(tessra_core::object::Effect::Point {
+                entity: intent.id,
+                to: ioid,
+                from: None,
+            });
         }
-        let op = build::build_op(&repo.log, &actor.signer, actor.cap, "import", build::args_with_idem(EntityId::random().0, std::collections::BTreeMap::new()), effects, now())?;
+        let op = build::build_op(
+            &repo.log,
+            &actor.signer,
+            actor.cap,
+            "import",
+            build::args_with_idem(EntityId::random().0, std::collections::BTreeMap::new()),
+            effects,
+            now(),
+        )?;
         repo.commit_op(&op)?;
         // Land it through the normal path, in a workspace of the owner's.
         let ws_id = EntityId::random();
@@ -349,7 +469,12 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         repo.remove_workspace(&ws_id)?;
         match landed {
             Ok(o) => {
-                let landing = o.result.get("revision").and_then(Json::as_str).and_then(|h| ObjectId::from_hex(h).ok()).unwrap_or(rev_id);
+                let landing = o
+                    .result
+                    .get("revision")
+                    .and_then(Json::as_str)
+                    .and_then(|h| ObjectId::from_hex(h).ok())
+                    .unwrap_or(rev_id);
                 remember(repo, &landing, commit)?;
                 imported.push(json!({ "commit": commit, "title": content.title, "landed": o.result.get("stage") == Some(&json!("landed")), "revision": landing.to_hex() }));
             }
@@ -361,7 +486,9 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
     }
     // The checkout itself moved with git; its workspace follows HEAD.
     let workspace = follow_checkout(repo, &work)?;
-    Ok(json!({ "branch": branch, "tip": tip, "imported": imported.len(), "commits": imported, "workspace": workspace }))
+    Ok(
+        json!({ "branch": branch, "tip": tip, "imported": imported.len(), "commits": imported, "workspace": workspace }),
+    )
 }
 
 #[cfg(test)]
@@ -371,12 +498,23 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t.local", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t.local",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .current_dir(dir)
             .output()
             .unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A git checkout on `main` with one commit, under Tessra.
@@ -405,7 +543,12 @@ mod tests {
 
     fn root_at_on_disk(repo: &Repo) -> ObjectId {
         let ws = repo.root_workspace().unwrap();
-        let bytes = std::fs::read(repo.tessra_dir.join("workspaces").join(format!("{}.cbor", ws.id))).unwrap();
+        let bytes = std::fs::read(
+            repo.tessra_dir
+                .join("workspaces")
+                .join(format!("{}.cbor", ws.id)),
+        )
+        .unwrap();
         let saved: tessra_core::object::Workspace = tessra_core::cbor::decode(&bytes).unwrap();
         saved.current.unwrap_or(saved.base)
     }
@@ -424,11 +567,19 @@ mod tests {
         assert_eq!(out["workspace"]["workspace"], json!("followed"), "{out}");
         let (head, _) = crate::verbs::trunk_head_of(&repo).unwrap();
         assert_ne!(head, before);
-        assert_eq!(root_at(&repo), head, "the checkout's workspace sits on the landed revision");
+        assert_eq!(
+            root_at(&repo),
+            head,
+            "the checkout's workspace sits on the landed revision"
+        );
         assert_eq!(root_at_on_disk(&repo), head, "and it is persisted");
         // The owner's status describes the imported commit now.
         let status = crate::verbs::call(&mut repo, &mut actor, "status", &json!({}));
-        assert_eq!(status["state"]["revision"], json!(head.to_hex()), "{status}");
+        assert_eq!(
+            status["state"]["revision"],
+            json!(head.to_hex()),
+            "{status}"
+        );
         assert_eq!(status["result"]["title"], json!("two"), "{status}");
         // Nothing new to import: the workspace is already there.
         let out = import_git(&mut repo, &mut actor, "main").unwrap();
@@ -442,7 +593,12 @@ mod tests {
         let mut actor = repo.daemon_actor();
         // The owner snapshots a draft in the checkout: unlanded work.
         std::fs::write(dir.path().join("c.txt"), "draft\n").unwrap();
-        let out = crate::verbs::call(&mut repo, &mut actor, "snapshot", &json!({ "title": "draft" }));
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "draft" }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
         let draft = root_at(&repo);
         // A commit arrives with git meanwhile.
@@ -452,8 +608,16 @@ mod tests {
         let out = import_git(&mut repo, &mut actor, "main").unwrap();
         assert_eq!(out["imported"], json!(1), "{out}");
         assert_eq!(out["workspace"]["workspace"], json!("left alone"), "{out}");
-        assert_eq!(out["workspace"]["why"], json!("it carries unlanded work"), "{out}");
-        assert_eq!(root_at(&repo), draft, "the draft stays the workspace's revision");
+        assert_eq!(
+            out["workspace"]["why"],
+            json!("it carries unlanded work"),
+            "{out}"
+        );
+        assert_eq!(
+            root_at(&repo),
+            draft,
+            "the draft stays the workspace's revision"
+        );
     }
 
     #[test]
@@ -473,7 +637,10 @@ mod tests {
             principal: owner.principal(),
             base: head_id,
             current: Some(head_id),
-            paths: std::collections::BTreeMap::from([("".to_string(), wsdir.path().display().to_string())]),
+            paths: std::collections::BTreeMap::from([(
+                "".to_string(),
+                wsdir.path().display().to_string(),
+            )]),
             env: None,
             created: now(),
             expires: None,

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use ciborium::value::Value as Cbor;
+use serde_json::{json, Value as Json};
 use tessra_core::cbor;
 use tessra_core::object::{
     Claim, ClaimTarget, Effect, Memory, MemoryScope, Revision, Snapshot, TrackingRules, Workspace,
@@ -15,7 +16,6 @@ use tessra_oplog::build::{self, point_effect};
 use tessra_oplog::standard;
 use tessra_oplog::verify::landed_revisions;
 use tessra_oplog::view::{line_head, Pointer, ViewState};
-use serde_json::{json, Value as Json};
 
 use crate::principals::Actor;
 use crate::tree::{self, Flat};
@@ -34,13 +34,29 @@ pub fn call(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json) -> Json
 
 fn call_inner(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json, limit: u64) -> Json {
     // A throttled agent's mutations wait out the cooldown.
-    const MUTATIONS: &[&str] = &["edit", "snapshot", "promote", "claim", "remember", "try", "revert", "plan", "attest", "workspace"];
+    const MUTATIONS: &[&str] = &[
+        "edit",
+        "snapshot",
+        "promote",
+        "claim",
+        "remember",
+        "try",
+        "revert",
+        "plan",
+        "attest",
+        "workspace",
+    ];
     if actor.kind == "session" && MUTATIONS.contains(&verb) {
         if let Err(e) = crate::anomaly::check(repo, &actor.principal()) {
             // Trying again while throttled is itself a signal.
-            let more = crate::anomaly::record(repo, &actor.principal(), &format!("{verb} while throttled"), 1)
-                .unwrap_or(None)
-                .unwrap_or(Json::Null);
+            let more = crate::anomaly::record(
+                repo,
+                &actor.principal(),
+                &format!("{verb} while throttled"),
+                1,
+            )
+            .unwrap_or(None)
+            .unwrap_or(Json::Null);
             let state = state(repo, actor).unwrap_or_else(|e| json!({ "error": e.to_string() }));
             if more.get("revoked").and_then(Json::as_bool).unwrap_or(false) {
                 return json!({ "ok": false, "code": "REVOKED", "message": "revoked by the risk monitor after repeated anomalies; unlanded work unwound", "anomaly": more, "state": state });
@@ -366,14 +382,24 @@ pub fn cbor_to_json(v: &Cbor) -> Json {
 /// One object as JSON. A blob is paged: `chars` of its text from `offset`,
 /// or its last `chars` when `tail` is set, with `next_offset` when more
 /// follows, so a verifier's evidence can be read to its end within a budget.
-fn object_json(repo: &Repo, id: &ObjectId, offset: usize, tail: bool, chars: usize) -> Result<Json> {
+fn object_json(
+    repo: &Repo,
+    id: &ObjectId,
+    offset: usize,
+    tail: bool,
+    chars: usize,
+) -> Result<Json> {
     let bytes = repo
         .get_bytes(id)?
         .ok_or(tessra_core::Error::NotFound(*id))?;
     let tag = cbor::peek_tag(&bytes).unwrap_or_else(|_| "blob".into());
     if tag == "blob" && cbor::peek_tag(&bytes).is_err() {
         let size = bytes.len();
-        let start = if tail { size.saturating_sub(chars) } else { offset.min(size) };
+        let start = if tail {
+            size.saturating_sub(chars)
+        } else {
+            offset.min(size)
+        };
         let end = start.saturating_add(chars).min(size);
         let window = String::from_utf8_lossy(&bytes[start..end]);
         let (text, from, to) = if tail {
@@ -523,7 +549,10 @@ fn status(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     if let Some(agent) = repo.session_agent(&actor.principal()) {
         if let Some(a) = crate::swarm::load_assignment(repo, &agent) {
             result["assignment"] = json!({ "intent": a.intent.to_letters(), "title": a.title, "units": a.units, "paths": a.paths, "ops_budget": a.ops });
-            return ok(result, &["workspace --action create", "claim --paths <your paths>"]);
+            return ok(
+                result,
+                &["workspace --action create", "claim --paths <your paths>"],
+            );
         }
     }
     ok(result, &["workspace --action create"])
@@ -589,7 +618,11 @@ fn context(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         }
         _ => Vec::new(),
     };
-    let reserve = units_all.iter().map(|u| json_len(u) + 1).sum::<usize>().min(budget);
+    let reserve = units_all
+        .iter()
+        .map(|u| json_len(u) + 1)
+        .sum::<usize>()
+        .min(budget);
     let mut files = Vec::new();
     if let Some(p) = path {
         let ws = require_workspace(repo, actor)?;
@@ -686,7 +719,8 @@ fn context(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         "memories": mems_total - mems.len(),
         "claims": claims_total - claims.len(),
     });
-    truncated |= units_total > units.len() || mems_total > mems.len() || claims_total > claims.len();
+    truncated |=
+        units_total > units.len() || mems_total > mems.len() || claims_total > claims.len();
     let mut next: Vec<String> = vec!["edit".into(), "claim --action claim --paths <paths>".into()];
     if truncated {
         if let Some(p) = path {
@@ -750,7 +784,13 @@ fn fit_suffix(text: &str, room: usize) -> usize {
 /// depends on, what depends on it, the tests that cover it, memories about
 /// it and its file, claims near it, and who last changed it. Text is cut
 /// to the budget in that order.
-fn unit_pack(repo: &mut Repo, actor: &mut Actor, unit: &str, path: Option<&str>, budget: usize) -> Result<Outcome> {
+fn unit_pack(
+    repo: &mut Repo,
+    actor: &mut Actor,
+    unit: &str,
+    path: Option<&str>,
+    budget: usize,
+) -> Result<Outcome> {
     // Reading needs no workspace: without one, the pack describes trunk.
     let (rev_id, rev) = match actor_workspace(repo, actor) {
         Some(ws) => current_revision(repo, &ws)?,
@@ -805,13 +845,19 @@ fn unit_pack(repo: &mut Repo, actor: &mut Actor, unit: &str, path: Option<&str>,
             s
         } else {
             *truncated = true;
-            let cut = s.char_indices().map(|(i, _)| i).take_while(|i| *i <= *chars_left).last().unwrap_or(0);
+            let cut = s
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|i| *i <= *chars_left)
+                .last()
+                .unwrap_or(0);
             let out = s[..cut].to_string();
             *chars_left = 0;
             out
         }
     };
-    let by_nid: HashMap<EntityId, &tessra_core::object::Node> = idx.nodes.iter().map(|n| (n.nid, n)).collect();
+    let by_nid: HashMap<EntityId, &tessra_core::object::Node> =
+        idx.nodes.iter().map(|n| (n.nid, n)).collect();
     let unit_text = {
         let t = text_of(repo, &node.path);
         take(slice(&t, &node), &mut chars_left, &mut truncated)
@@ -834,12 +880,17 @@ fn unit_pack(repo: &mut Repo, actor: &mut Actor, unit: &str, path: Option<&str>,
     let dependents: Vec<Json> = idx
         .nodes
         .iter()
-        .filter(|n| n.nid != node.nid && !matches!(n.kind.as_str(), "test" | "test.skipped" | "module" | "impl") && n.deps.iter().flatten().any(|d| *d == node.nid))
+        .filter(|n| {
+            n.nid != node.nid
+                && !matches!(n.kind.as_str(), "test" | "test.skipped" | "module" | "impl")
+                && n.deps.iter().flatten().any(|d| *d == node.nid)
+        })
         .map(|n| json!({ "path": n.path, "name": n.name, "kind": n.kind }))
         .collect();
     let mut mems = Vec::new();
     for (id, m) in memories(repo, actor, Some(&node.path), None)? {
-        let on_node = m.scope.kind == "node" && matches!(&m.scope.r#ref, Cbor::Text(r) if r == &node.nid.to_letters() || r == &node.name);
+        let on_node = m.scope.kind == "node"
+            && matches!(&m.scope.r#ref, Cbor::Text(r) if r == &node.nid.to_letters() || r == &node.name);
         if !on_node && m.scope.kind == "node" {
             continue;
         }
@@ -851,7 +902,11 @@ fn unit_pack(repo: &mut Repo, actor: &mut Actor, unit: &str, path: Option<&str>,
         chars_left -= cost;
         mems.push(memory_json(&id, &m));
     }
-    let claims: Vec<Json> = crate::swarm::overlapping_claims(repo, actor.principal(), std::slice::from_ref(&node.path))?;
+    let claims: Vec<Json> = crate::swarm::overlapping_claims(
+        repo,
+        actor.principal(),
+        std::slice::from_ref(&node.path),
+    )?;
     let blame = crate::semantic::blame(repo, rev_id, &node.path)?
         .into_iter()
         .find(|e| e.nid == node.nid)
@@ -1439,7 +1494,11 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             let (_, snap) = root_snapshot(repo, &rev)?;
             let started = std::time::Instant::now();
             let n = fs::materialize(repo.store(), &snap.root, &path, false)?;
-            let state_restored = if args.get("with_state").and_then(Json::as_bool).unwrap_or(false) {
+            let state_restored = if args
+                .get("with_state")
+                .and_then(Json::as_bool)
+                .unwrap_or(false)
+            {
                 restore_state(repo, &snap, &path)?
             } else {
                 Vec::new()
@@ -1472,9 +1531,17 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             let target = if to == "trunk" {
                 trunk_head(repo)?.0
             } else {
-                let matches: Vec<ObjectId> = repo.store().ids()?.into_iter().filter(|i| i.matches_prefix(to)).collect();
+                let matches: Vec<ObjectId> = repo
+                    .store()
+                    .ids()?
+                    .into_iter()
+                    .filter(|i| i.matches_prefix(to))
+                    .collect();
                 if matches.len() != 1 {
-                    return Err(Error::verb("NOT_FOUND", format!("{} revisions match {to}", matches.len())));
+                    return Err(Error::verb(
+                        "NOT_FOUND",
+                        format!("{} revisions match {to}", matches.len()),
+                    ));
                 }
                 matches[0]
             };
@@ -1591,7 +1658,13 @@ fn edit(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         .unwrap_or(true);
     let mut anomaly = Json::Null;
     if !in_scope {
-        anomaly = crate::anomaly::record(repo, &actor.principal(), &format!("edit outside write scope: {path}"), 2)?.unwrap_or(Json::Null);
+        anomaly = crate::anomaly::record(
+            repo,
+            &actor.principal(),
+            &format!("edit outside write scope: {path}"),
+            2,
+        )?
+        .unwrap_or(Json::Null);
     } else if actor.kind == "session" {
         // Writing outside every claim it holds is the early signal.
         let held: Vec<String> = actor_claims(repo, actor)?
@@ -1602,8 +1675,18 @@ fn edit(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 _ => None,
             })
             .collect();
-        if !held.is_empty() && !held.iter().any(|h| path.starts_with(h.as_str()) || tessra_oplog::glob::matches(h, path)) {
-            anomaly = crate::anomaly::record(repo, &actor.principal(), &format!("edit outside claims: {path}"), 1)?.unwrap_or(Json::Null);
+        if !held.is_empty()
+            && !held
+                .iter()
+                .any(|h| path.starts_with(h.as_str()) || tessra_oplog::glob::matches(h, path))
+        {
+            anomaly = crate::anomaly::record(
+                repo,
+                &actor.principal(),
+                &format!("edit outside claims: {path}"),
+                1,
+            )?
+            .unwrap_or(Json::Null);
         }
     }
     ok(
@@ -1696,8 +1779,16 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     };
     let mut anomaly = Json::Null;
     if let Some(paths) = flags.as_ref().and_then(|f| f.out_of_scope.as_ref()) {
-        if !paths.is_empty() && cur.flags.as_ref().and_then(|f| f.out_of_scope.as_ref()) != Some(paths) {
-            anomaly = crate::anomaly::record(repo, &actor.principal(), &format!("snapshot outside write scope: {}", paths.join(", ")), 2)?.unwrap_or(Json::Null);
+        if !paths.is_empty()
+            && cur.flags.as_ref().and_then(|f| f.out_of_scope.as_ref()) != Some(paths)
+        {
+            anomaly = crate::anomaly::record(
+                repo,
+                &actor.principal(),
+                &format!("snapshot outside write scope: {}", paths.join(", ")),
+                2,
+            )?
+            .unwrap_or(Json::Null);
         }
     }
     if out.tree == cur_snap.root && flags == cur.flags {
@@ -1715,7 +1806,10 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let index_id = crate::semantic::put_index(repo.store(), out.tree, vec![parent_idx_id], nodes)?;
     // Dependencies and build state alongside the files: the toolchain,
     // lockfile hashes, and a tree per state path, when asked or configured.
-    let with_state = args.get("with_state").and_then(Json::as_bool).unwrap_or(false)
+    let with_state = args
+        .get("with_state")
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
         || matches!(repo.config().get("snapshot_state"), Some(Cbor::Bool(true)));
     let mut state_json: Vec<Json> = Vec::new();
     let mut env_json = Json::Null;
@@ -1984,7 +2078,11 @@ fn verify(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let only: Vec<String> = args
         .get("kinds")
         .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let ran = if conflicts.is_empty() {
         run_verifiers(repo, &rev_id, &rev, full, &only)?
@@ -2044,15 +2142,16 @@ fn run_verifiers(
     use std::time::Duration;
     let (snap_id, snap) = root_snapshot(repo, rev)?;
     let (_, idx) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
-    let parent: Option<(ObjectId, Snapshot, tessra_core::object::NodeIndex)> = match rev.parents.first() {
-        Some(p) => {
-            let pr: Revision = repo.store().get(p)?;
-            let (ps_id, ps) = root_snapshot(repo, &pr)?;
-            let (_, pidx) = crate::semantic::index_for_snapshot(repo.store(), &ps_id)?;
-            Some((ps_id, ps, pidx))
-        }
-        None => None,
-    };
+    let parent: Option<(ObjectId, Snapshot, tessra_core::object::NodeIndex)> =
+        match rev.parents.first() {
+            Some(p) => {
+                let pr: Revision = repo.store().get(p)?;
+                let (ps_id, ps) = root_snapshot(repo, &pr)?;
+                let (_, pidx) = crate::semantic::index_for_snapshot(repo.store(), &ps_id)?;
+                Some((ps_id, ps, pidx))
+            }
+            None => None,
+        };
     let view = repo.log.current_view()?;
     let vs = ViewState::new(repo.store());
     let std_id = trunk_standard(repo)?;
@@ -2060,7 +2159,9 @@ fn run_verifiers(
     let required = standard::required_attestations(&chain);
     let (_, unmet, applying) = standard_status(repo, rev_id, rev)?;
     let needed = |kind: &str| -> bool {
-        full || unmet.iter().any(|u| u.clause.contains(&format!("attest({kind}")))
+        full || unmet
+            .iter()
+            .any(|u| u.clause.contains(&format!("attest({kind}")))
     };
     let mut applying_kinds: HashSet<String> = HashSet::new();
     for id in &applying {
@@ -2068,12 +2169,10 @@ fn run_verifiers(
             applying_kinds.insert(a.kind);
         }
     }
-    let timeout = Duration::from_secs(
-        match repo.config().get("verify_timeout_s") {
-            Some(Cbor::Integer(i)) => i128::from(*i).clamp(1, 86_400) as u64,
-            _ => 600,
-        },
-    );
+    let timeout = Duration::from_secs(match repo.config().get("verify_timeout_s") {
+        Some(Cbor::Integer(i)) => i128::from(*i).clamp(1, 86_400) as u64,
+        _ => 600,
+    });
     let ws_dir = actor_dir_for(repo, rev)?;
     let verifiers = vf::verifiers_for(repo, &ws_dir);
     let mut ran = Vec::new();
@@ -2115,11 +2214,16 @@ fn run_verifiers(
                     continue;
                 };
                 let prev_ids: HashSet<EntityId> = parent_idx.nodes.iter().map(|n| n.nid).collect();
-                let prev_bodies: HashSet<ObjectId> = parent_idx.nodes.iter().map(|n| n.body).collect();
+                let prev_bodies: HashSet<ObjectId> =
+                    parent_idx.nodes.iter().map(|n| n.body).collect();
                 let new_tests: Vec<&tessra_core::object::Node> = idx
                     .nodes
                     .iter()
-                    .filter(|n| (n.kind == "test" || n.kind == "test.skipped") && !prev_ids.contains(&n.nid) && !prev_bodies.contains(&n.body))
+                    .filter(|n| {
+                        (n.kind == "test" || n.kind == "test.skipped")
+                            && !prev_ids.contains(&n.nid)
+                            && !prev_bodies.contains(&n.body)
+                    })
                     .collect();
                 if new_tests.is_empty() {
                     ran.push(json!({ "kind": kind, "skipped": "no new tests" }));
@@ -2131,7 +2235,11 @@ fn run_verifiers(
                 }
                 // The parent's tree with only the new tests laid into it:
                 // the code under test stays the parent's.
-                let dir = vf::materialize_scratch(repo, &parent_snap.root, &format!("parent-{}", &snap_id.to_hex()[..12]))?;
+                let dir = vf::materialize_scratch(
+                    repo,
+                    &parent_snap.root,
+                    &format!("parent-{}", &snap_id.to_hex()[..12]),
+                )?;
                 let flat = tree::flatten(repo.store(), &snap.root)?;
                 let parent_flat = tree::flatten(repo.store(), &parent_snap.root)?;
                 let mut paths: Vec<&str> = new_tests.iter().map(|n| n.path.as_str()).collect();
@@ -2148,8 +2256,15 @@ fn run_verifiers(
                     let parent_text = text_of(&parent_flat);
                     let change_nodes = crate::semantic::nodes_for_path(&idx, p);
                     let parent_nodes = crate::semantic::nodes_for_path(parent_idx, p);
-                    let here: Vec<&tessra_core::object::Node> = new_tests.iter().copied().filter(|n| n.path == *p).collect();
-                    let merged = vf::overlay_tests(&parent_text, &parent_nodes, &change_text, &change_nodes, &here);
+                    let here: Vec<&tessra_core::object::Node> =
+                        new_tests.iter().copied().filter(|n| n.path == *p).collect();
+                    let merged = vf::overlay_tests(
+                        &parent_text,
+                        &parent_nodes,
+                        &change_text,
+                        &change_nodes,
+                        &here,
+                    );
                     let full_path = dir.join(p);
                     if let Some(d) = full_path.parent() {
                         std::fs::create_dir_all(d)?;
@@ -2167,15 +2282,25 @@ fn run_verifiers(
                 } else {
                     names
                         .iter()
-                        .filter(|n| out.tests.iter().any(|(t, okk)| *okk && vf::test_matches(t, n)))
+                        .filter(|n| {
+                            out.tests
+                                .iter()
+                                .any(|(t, okk)| *okk && vf::test_matches(t, n))
+                        })
                         .cloned()
                         .collect()
                 };
                 let proves = passed_on_parent.is_empty();
                 let scope_map = BTreeMap::from([
                     ("tests".to_string(), vf::text_list(&names)),
-                    ("passed_on_parent".to_string(), vf::text_list(&passed_on_parent)),
-                    ("paths".to_string(), vf::text_list(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>())),
+                    (
+                        "passed_on_parent".to_string(),
+                        vf::text_list(&passed_on_parent),
+                    ),
+                    (
+                        "paths".to_string(),
+                        vf::text_list(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>()),
+                    ),
                 ]);
                 let att = vf::attest_as_runner(
                     repo,
@@ -2201,10 +2326,21 @@ fn run_verifiers(
                 let mut selected_bodies: Vec<ObjectId> = Vec::new();
                 if !full && tool.filter != Filter::None {
                     if let Some((_, _, parent_idx)) = parent.as_ref() {
-                        let changed: Vec<&tessra_core::object::Node> = vf::changed_units(parent_idx, &idx)
-                            .into_iter()
-                            .filter(|n| !matches!(n.kind.as_str(), "import" | "chunk" | "impl" | "module" | "variant" | "field"))
-                            .collect();
+                        let changed: Vec<&tessra_core::object::Node> =
+                            vf::changed_units(parent_idx, &idx)
+                                .into_iter()
+                                .filter(|n| {
+                                    !matches!(
+                                        n.kind.as_str(),
+                                        "import"
+                                            | "chunk"
+                                            | "impl"
+                                            | "module"
+                                            | "variant"
+                                            | "field"
+                                    )
+                                })
+                                .collect();
                         let covering = crate::semantic::covering_tests(&idx);
                         let all_tests = idx.nodes.iter().filter(|n| n.kind == "test").count();
                         let mut names: Vec<String> = Vec::new();
@@ -2231,7 +2367,8 @@ fn run_verifiers(
                             }
                         }
                         // Dependents of what changed bring their covering tests along.
-                        let changed_ids: HashSet<EntityId> = changed.iter().map(|n| n.nid).collect();
+                        let changed_ids: HashSet<EntityId> =
+                            changed.iter().map(|n| n.nid).collect();
                         for d in idx.nodes.iter().filter(|n| {
                             !changed_ids.contains(&n.nid)
                                 && n.kind != "test"
@@ -2263,13 +2400,24 @@ fn run_verifiers(
                     ("passed".to_string(), Cbor::Integer((passed as u64).into())),
                     ("failed".to_string(), Cbor::Integer((failed as u64).into())),
                     ("selected".to_string(), Cbor::Bool(!selected.is_empty())),
-                    ("elapsed_ms".to_string(), Cbor::Integer(out.elapsed_ms.into())),
+                    (
+                        "elapsed_ms".to_string(),
+                        Cbor::Integer(out.elapsed_ms.into()),
+                    ),
                 ]);
                 let ran_names: Vec<String> = out.tests.iter().map(|(t, _)| t.clone()).collect();
                 scope_map.insert("tests".to_string(), vf::text_list(&ran_names));
-                let failed_names: Vec<String> = out.tests.iter().filter(|(_, okk)| !*okk).map(|(t, _)| t.clone()).collect();
+                let failed_names: Vec<String> = out
+                    .tests
+                    .iter()
+                    .filter(|(_, okk)| !*okk)
+                    .map(|(t, _)| t.clone())
+                    .collect();
                 scope_map.insert("failed".to_string(), vf::text_list(&failed_names));
-                scope_map.insert("exit".to_string(), Cbor::Integer(i64::from(out.exit.unwrap_or(-1)).into()));
+                scope_map.insert(
+                    "exit".to_string(),
+                    Cbor::Integer(i64::from(out.exit.unwrap_or(-1)).into()),
+                );
                 let (subject, bodies) = if selected.is_empty() {
                     (Some((snap_id.as_bytes().as_slice(), "snapshot")), None)
                 } else {
@@ -2344,15 +2492,25 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
     let list = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(Json::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let require = list("require");
     let forbid = list("forbid");
     let remove = list("remove");
     let when_level = arg_str(args, "when").map(str::to_string);
-    if when_level.as_deref().is_some_and(|l| !matches!(l, "low" | "medium" | "high" | "critical")) {
-        return Err(Error::verb("ARGS", "when takes low, medium, high, or critical"));
+    if when_level
+        .as_deref()
+        .is_some_and(|l| !matches!(l, "low" | "medium" | "high" | "critical"))
+    {
+        return Err(Error::verb(
+            "ARGS",
+            "when takes low, medium, high, or critical",
+        ));
     }
     let clause_text = |c: &tessra_core::object::Clause| -> String {
         let mut t = format!("{} {}", c.op, standard::describe(&c.pred));
@@ -2365,7 +2523,11 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
         let mut out: Vec<String> = s.clauses.iter().map(clause_text).collect();
         for w in s.when.iter().flatten() {
             for c in &w.clauses {
-                out.push(format!("when risk>={}: {}", w.risk_at_least, clause_text(c)));
+                out.push(format!(
+                    "when risk>={}: {}",
+                    w.risk_at_least,
+                    clause_text(c)
+                ));
             }
         }
         out
@@ -2392,13 +2554,18 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
         // Match the text as written or as it would be shown, so argument
         // order does not matter.
         let (op_text, pred_text) = match r.split_once(' ') {
-            Some((op, rest)) if matches!(op, "require" | "forbid") => (Some(op.to_string()), rest.to_string()),
+            Some((op, rest)) if matches!(op, "require" | "forbid") => {
+                (Some(op.to_string()), rest.to_string())
+            }
             _ => (None, r.clone()),
         };
-        let normalized = standard::parse_predicate(&pred_text).map(|p| standard::describe(&p)).unwrap_or(pred_text.clone());
+        let normalized = standard::parse_predicate(&pred_text)
+            .map(|p| standard::describe(&p))
+            .unwrap_or(pred_text.clone());
         let matches = |c: &tessra_core::object::Clause| -> bool {
             let shown = standard::describe(&c.pred);
-            (shown == normalized || shown == pred_text) && op_text.as_deref().map_or(true, |o| o == c.op)
+            (shown == normalized || shown == pred_text)
+                && op_text.as_deref().map_or(true, |o| o == c.op)
         };
         next.clauses.retain(|c| !matches(c));
         let mut removed_when = false;
@@ -2449,7 +2616,10 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
         actor.cap,
         "standard",
         build::args_with_idem(idem_from(args), BTreeMap::new()),
-        vec![Effect::Put { id: new_oid }, point_effect(&repo.log, std_id, new_oid)?],
+        vec![
+            Effect::Put { id: new_oid },
+            point_effect(&repo.log, std_id, new_oid)?,
+        ],
         now(),
     )?;
     repo.commit_op(&op)?;
@@ -2465,7 +2635,10 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
 fn attest_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let kind = arg_str(args, "kind").ok_or_else(|| Error::verb("ARGS", "attest needs kind"))?;
     if kind.starts_with("approval.") && actor.kind != "human" {
-        return Err(Error::verb("SCOPE", "approvals are recorded by humans through channels, never by a session or the daemon"));
+        return Err(Error::verb(
+            "SCOPE",
+            "approvals are recorded by humans through channels, never by a session or the daemon",
+        ));
     }
     let ws = actor_workspace(repo, actor);
     let subject: ObjectId = match arg_str(args, "subject") {
@@ -2478,12 +2651,23 @@ fn attest_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
                 .collect();
             match matches.len() {
                 1 => matches[0],
-                0 => return Err(Error::verb("NOT_FOUND", format!("no object with prefix {prefix}"))),
-                n => return Err(Error::verb("AMBIGUOUS", format!("{n} objects match {prefix}"))),
+                0 => {
+                    return Err(Error::verb(
+                        "NOT_FOUND",
+                        format!("no object with prefix {prefix}"),
+                    ))
+                }
+                n => {
+                    return Err(Error::verb(
+                        "AMBIGUOUS",
+                        format!("{n} objects match {prefix}"),
+                    ))
+                }
             }
         }
         None => {
-            let ws = ws.ok_or_else(|| Error::verb("ARGS", "attest needs subject or a workspace"))?;
+            let ws =
+                ws.ok_or_else(|| Error::verb("ARGS", "attest needs subject or a workspace"))?;
             current_revision(repo, &ws)?.0
         }
     };
@@ -2553,7 +2737,10 @@ fn promote(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     if !matches!(to, "proposed" | "landed") {
         // A target: deploy the trunk head, or the caller's landed revision, to a slice.
         if crate::delivery::target_by_name(repo, to).is_err() {
-            return Err(Error::verb("ARGS", format!("promote to {to}: not a stage and not a target")));
+            return Err(Error::verb(
+                "ARGS",
+                format!("promote to {to}: not a stage and not a target"),
+            ));
         }
         let slice = arg_str(args, "slice").unwrap_or("all");
         if !matches!(slice, "canary" | "all") {
@@ -2564,7 +2751,14 @@ fn promote(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
             _ => None,
         };
         let out = crate::delivery::deploy(repo, actor, to, revision, slice, "deploy")?;
-        return ok(out, &[if slice == "canary" { "observe --target <name>" } else { "status" }]);
+        return ok(
+            out,
+            &[if slice == "canary" {
+                "observe --target <name>"
+            } else {
+                "status"
+            }],
+        );
     }
     let ws = require_workspace(repo, actor)?;
     let (rev_id, rev) = current_revision(repo, &ws)?;
@@ -2650,215 +2844,228 @@ fn land_one(
     let view = repo.log.current_view()?;
     let ws = ws.clone();
     let rev = rev.clone();
-            let (head_id, seq) = trunk_head(repo)?;
-            let coordinator = view.lines["trunk"].coordinator;
-            if actor.principal() != coordinator {
-                return Err(Error::verb(
-                    "SCOPE",
-                    "only the trunk coordinator lands; propose it and let the coordinator land",
+    let (head_id, seq) = trunk_head(repo)?;
+    let coordinator = view.lines["trunk"].coordinator;
+    if actor.principal() != coordinator {
+        return Err(Error::verb(
+            "SCOPE",
+            "only the trunk coordinator lands; propose it and let the coordinator land",
+        ));
+    }
+    let head: Revision = repo.store().get(&head_id)?;
+    let (head_snap_id, head_snap) = root_snapshot(repo, &head)?;
+    let (rev_snap_id, rev_snap) = root_snapshot(repo, &rev)?;
+    let mut semantic_resolved: Vec<String> = Vec::new();
+    let (merged_root, merged_index) = if rev.parents.first() == Some(&head_id) {
+        (rev_snap.root, rev_snap.index)
+    } else {
+        let base_id = revision_lca(repo, &head_id, &rev_id)?;
+        let (base_root, base_snap_id) = match base_id {
+            Some(b) => {
+                let br: Revision = repo.store().get(&b)?;
+                let (bs_id, bs) = root_snapshot(repo, &br)?;
+                (bs.root, Some(bs_id))
+            }
+            None => (repo.store().put(&tessra_core::object::Tree::empty())?, None),
+        };
+        let base = tree::flatten(repo.store(), &base_root)?;
+        let a = tree::flatten(repo.store(), &head_snap.root)?;
+        let b = tree::flatten(repo.store(), &rev_snap.root)?;
+        let base_idx = match base_snap_id {
+            Some(id) => Some(crate::semantic::index_for_snapshot(repo.store(), &id)?.1),
+            None => None,
+        };
+        let (a_idx_id, a_idx) = crate::semantic::index_for_snapshot(repo.store(), &head_snap_id)?;
+        let (_, b_idx) = crate::semantic::index_for_snapshot(repo.store(), &rev_snap_id)?;
+        // Renames each side recorded: the change's own ops, and the
+        // ops of every trunk revision since the base.
+        let ops_b = crate::semantic::recorded_renames(rev.ops.as_deref().unwrap_or(&[]));
+        let ops_a = {
+            let mut out = Vec::new();
+            let mut cur = Some(head_id);
+            let mut steps = 0;
+            while let Some(id) = cur {
+                if Some(id) == base_id || steps > 1000 {
+                    break;
+                }
+                steps += 1;
+                let r: Revision = repo.store().get(&id)?;
+                out.extend(crate::semantic::recorded_renames(
+                    r.ops.as_deref().unwrap_or(&[]),
                 ));
+                cur = r.parents.first().copied();
             }
-            let head: Revision = repo.store().get(&head_id)?;
-            let (head_snap_id, head_snap) = root_snapshot(repo, &head)?;
-            let (rev_snap_id, rev_snap) = root_snapshot(repo, &rev)?;
-            let mut semantic_resolved: Vec<String> = Vec::new();
-            let (merged_root, merged_index) = if rev.parents.first() == Some(&head_id) {
-                (rev_snap.root, rev_snap.index)
-            } else {
-                let base_id = revision_lca(repo, &head_id, &rev_id)?;
-                let (base_root, base_snap_id) = match base_id {
-                    Some(b) => {
-                        let br: Revision = repo.store().get(&b)?;
-                        let (bs_id, bs) = root_snapshot(repo, &br)?;
-                        (bs.root, Some(bs_id))
-                    }
-                    None => (repo.store().put(&tessra_core::object::Tree::empty())?, None),
-                };
-                let base = tree::flatten(repo.store(), &base_root)?;
-                let a = tree::flatten(repo.store(), &head_snap.root)?;
-                let b = tree::flatten(repo.store(), &rev_snap.root)?;
-                let base_idx = match base_snap_id {
-                    Some(id) => Some(crate::semantic::index_for_snapshot(repo.store(), &id)?.1),
-                    None => None,
-                };
-                let (a_idx_id, a_idx) =
-                    crate::semantic::index_for_snapshot(repo.store(), &head_snap_id)?;
-                let (_, b_idx) = crate::semantic::index_for_snapshot(repo.store(), &rev_snap_id)?;
-                // Renames each side recorded: the change's own ops, and the
-                // ops of every trunk revision since the base.
-                let ops_b = crate::semantic::recorded_renames(rev.ops.as_deref().unwrap_or(&[]));
-                let ops_a = {
-                    let mut out = Vec::new();
-                    let mut cur = Some(head_id);
-                    let mut steps = 0;
-                    while let Some(id) = cur {
-                        if Some(id) == base_id || steps > 1000 {
-                            break;
-                        }
-                        steps += 1;
-                        let r: Revision = repo.store().get(&id)?;
-                        out.extend(crate::semantic::recorded_renames(r.ops.as_deref().unwrap_or(&[])));
-                        cur = r.parents.first().copied();
-                    }
-                    out
-                };
-                let tm = crate::semantic::merge_trees(
-                    repo.store(),
-                    &base,
-                    &a,
-                    &b,
-                    base_idx.as_ref(),
-                    &a_idx,
-                    &b_idx,
-                    &ops_a,
-                    &ops_b,
-                )?;
-                if !tm.conflicts.is_empty() {
-                    return record_conflict(
-                        repo,
-                        actor,
-                        &ws,
-                        rev_id,
-                        &rev,
-                        head_id,
-                        rev_snap.rules,
-                        &tm.flat,
-                        &tm.conflicts,
-                        args,
-                    );
-                }
-                semantic_resolved = tm.resolved;
-                let merged = tm.flat;
-                let root = tree::build(repo.store(), &merged)?;
-                let mut nodes =
-                    crate::semantic::build_nodes(repo.store(), &merged, Some((&a, &a_idx)))?;
-                let aliases =
-                    crate::semantic::reconcile_aliases(&mut nodes, base_idx.as_ref(), &b_idx);
-                let idx = crate::semantic::put_index_with_aliases(
-                    repo.store(),
-                    root,
-                    vec![a_idx_id],
-                    nodes,
-                    Some(aliases),
-                )?;
-                (root, Some(idx))
-            };
-            let merged_snap = repo.store().put(&Snapshot {
-                root: merged_root,
-                rules: rev_snap.rules,
-                // Carry the change's environment onto the landing, so a
-                // checkout of trunk can restore its build state (M8).
-                env: rev_snap.env,
-                index: merged_index,
-            })?;
-            let landing = Revision {
-                id: rev.id,
-                prev: Some(rev_id),
-                snapshots: BTreeMap::from([("".to_string(), merged_snap)]),
-                parents: vec![head_id, rev_id],
-                intent: rev.intent,
-                title: rev.title.clone(),
-                body: rev.body.clone(),
-                // The landed revision is the same change; its author stays the change's author.
-                author: rev.author,
-                time: now(),
-                ops: None,
-                flags: None,
-            };
-            let landing_id = repo.store().put(&landing)?;
-            // Landing steps 6 and 7: collect what applies to the landing
-            // revision, run only what the merge invalidated, and refuse
-            // with the clauses named if the standard still does not hold.
-            let (_, mut unmet, mut cited) = standard_status(repo, &landing_id, &landing)?;
-            let mut landing_ran: Vec<Json> = Vec::new();
-            if !unmet.is_empty() && landing.parents.first() != landing.parents.get(1) {
-                landing_ran = run_verifiers(repo, &landing_id, &landing, false, &[])?;
-                let (_, u, c) = standard_status(repo, &landing_id, &landing)?;
-                unmet = u;
-                cited = c;
-            }
-            if !unmet.is_empty() {
-                if unmet.iter().any(|u| u.clause.contains("test.weakened") || u.clause.contains("test.deleted")) {
-                    let _ = crate::anomaly::record(repo, &rev.author, "landing refused: weakened tests", 2)?;
-                }
-                // Approvals are asked for on the change's own revision, which
-                // is what a human sees and what the landing revision cites as prev.
-                let request = ensure_approval_request(repo, &rev_id, &rev, &unmet)?;
-                note_approval(&mut unmet, &request);
-                let list: Vec<Json> = unmet
-                    .iter()
-                    .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
-                    .collect();
-                return Err(Error::verb(
-                    "STANDARD_UNMET",
-                    serde_json::to_string(&list).unwrap_or_default(),
-                ));
-            }
-            let vs = ViewState::new(repo.store());
-            let mut effects = vec![
-                Effect::Put { id: landing_id },
-                Effect::Head {
-                    line: "trunk".into(),
-                    to: landing_id,
-                    from: Some(Pointer::Id(head_id).to_value()),
-                    seq: seq + 1,
-                    attests: cited.clone(),
-                    id: None,
-                },
-            ];
-            // Every proposed revision of this change leaves the set, the
-            // one landing and any earlier one a conflict or restack left behind.
-            for pid in vs.set_members(&view.proposed)? {
-                let same_change = pid == rev_id
-                    || repo.store().get::<Revision>(&pid).map(|r| r.id == rev.id).unwrap_or(false);
-                if same_change {
-                    effects.push(Effect::Unpropose { rev: pid });
-                }
-            }
-            effects.push(point_effect(&repo.log, rev.id, landing_id)?);
-            let op = build::build_op(
-                &repo.log,
-                &actor.signer,
-                actor.cap,
-                "land",
-                build::args_with_idem(idem_from(args), BTreeMap::new()),
-                effects,
-                now(),
-            )?;
-            repo.commit_op(&op)?;
-            for w in repo.workspaces.iter_mut() {
-                if w.current == Some(rev_id) {
-                    w.current = Some(landing_id);
-                    w.base = landing_id;
-                }
-            }
-            let updated: Vec<Workspace> = repo
-                .workspaces
-                .iter()
-                .filter(|w| w.current == Some(landing_id))
-                .cloned()
-                .collect();
-            for w in updated {
-                repo.save_workspace(&w)?;
-            }
-            let restacked = crate::swarm::restack_children(repo, rev_id, landing_id)?;
-            close_requests_for(repo, &rev_id)?;
-            let hooks = crate::hooks::fire(
+            out
+        };
+        let tm = crate::semantic::merge_trees(
+            repo.store(),
+            &base,
+            &a,
+            &b,
+            base_idx.as_ref(),
+            &a_idx,
+            &b_idx,
+            &ops_a,
+            &ops_b,
+        )?;
+        if !tm.conflicts.is_empty() {
+            return record_conflict(
                 repo,
-                &crate::hooks::Event::new(repo, "landed", landing_id, &landing, json!({ "seq": seq + 1 }))?,
-            )?;
-            ok(
-                json!({
-                    "stage": "landed", "revision": landing_id.to_hex(), "seq": seq + 1,
-                    "merged": rev.parents.first() != Some(&head_id),
-                    "semantic": semantic_resolved,
-                    "attestations": cited.len(),
-                    "ran": landing_ran,
-                    "hooks": hooks,
-                    "restacked": restacked,
-                }),
-                &["status"],
-            )
+                actor,
+                &ws,
+                rev_id,
+                &rev,
+                head_id,
+                rev_snap.rules,
+                &tm.flat,
+                &tm.conflicts,
+                args,
+            );
+        }
+        semantic_resolved = tm.resolved;
+        let merged = tm.flat;
+        let root = tree::build(repo.store(), &merged)?;
+        let mut nodes = crate::semantic::build_nodes(repo.store(), &merged, Some((&a, &a_idx)))?;
+        let aliases = crate::semantic::reconcile_aliases(&mut nodes, base_idx.as_ref(), &b_idx);
+        let idx = crate::semantic::put_index_with_aliases(
+            repo.store(),
+            root,
+            vec![a_idx_id],
+            nodes,
+            Some(aliases),
+        )?;
+        (root, Some(idx))
+    };
+    let merged_snap = repo.store().put(&Snapshot {
+        root: merged_root,
+        rules: rev_snap.rules,
+        // Carry the change's environment onto the landing, so a
+        // checkout of trunk can restore its build state (M8).
+        env: rev_snap.env,
+        index: merged_index,
+    })?;
+    let landing = Revision {
+        id: rev.id,
+        prev: Some(rev_id),
+        snapshots: BTreeMap::from([("".to_string(), merged_snap)]),
+        parents: vec![head_id, rev_id],
+        intent: rev.intent,
+        title: rev.title.clone(),
+        body: rev.body.clone(),
+        // The landed revision is the same change; its author stays the change's author.
+        author: rev.author,
+        time: now(),
+        ops: None,
+        flags: None,
+    };
+    let landing_id = repo.store().put(&landing)?;
+    // Landing steps 6 and 7: collect what applies to the landing
+    // revision, run only what the merge invalidated, and refuse
+    // with the clauses named if the standard still does not hold.
+    let (_, mut unmet, mut cited) = standard_status(repo, &landing_id, &landing)?;
+    let mut landing_ran: Vec<Json> = Vec::new();
+    if !unmet.is_empty() && landing.parents.first() != landing.parents.get(1) {
+        landing_ran = run_verifiers(repo, &landing_id, &landing, false, &[])?;
+        let (_, u, c) = standard_status(repo, &landing_id, &landing)?;
+        unmet = u;
+        cited = c;
+    }
+    if !unmet.is_empty() {
+        if unmet
+            .iter()
+            .any(|u| u.clause.contains("test.weakened") || u.clause.contains("test.deleted"))
+        {
+            let _ =
+                crate::anomaly::record(repo, &rev.author, "landing refused: weakened tests", 2)?;
+        }
+        // Approvals are asked for on the change's own revision, which
+        // is what a human sees and what the landing revision cites as prev.
+        let request = ensure_approval_request(repo, &rev_id, &rev, &unmet)?;
+        note_approval(&mut unmet, &request);
+        let list: Vec<Json> = unmet
+            .iter()
+            .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
+            .collect();
+        return Err(Error::verb(
+            "STANDARD_UNMET",
+            serde_json::to_string(&list).unwrap_or_default(),
+        ));
+    }
+    let vs = ViewState::new(repo.store());
+    let mut effects = vec![
+        Effect::Put { id: landing_id },
+        Effect::Head {
+            line: "trunk".into(),
+            to: landing_id,
+            from: Some(Pointer::Id(head_id).to_value()),
+            seq: seq + 1,
+            attests: cited.clone(),
+            id: None,
+        },
+    ];
+    // Every proposed revision of this change leaves the set, the
+    // one landing and any earlier one a conflict or restack left behind.
+    for pid in vs.set_members(&view.proposed)? {
+        let same_change = pid == rev_id
+            || repo
+                .store()
+                .get::<Revision>(&pid)
+                .map(|r| r.id == rev.id)
+                .unwrap_or(false);
+        if same_change {
+            effects.push(Effect::Unpropose { rev: pid });
+        }
+    }
+    effects.push(point_effect(&repo.log, rev.id, landing_id)?);
+    let op = build::build_op(
+        &repo.log,
+        &actor.signer,
+        actor.cap,
+        "land",
+        build::args_with_idem(idem_from(args), BTreeMap::new()),
+        effects,
+        now(),
+    )?;
+    repo.commit_op(&op)?;
+    for w in repo.workspaces.iter_mut() {
+        if w.current == Some(rev_id) {
+            w.current = Some(landing_id);
+            w.base = landing_id;
+        }
+    }
+    let updated: Vec<Workspace> = repo
+        .workspaces
+        .iter()
+        .filter(|w| w.current == Some(landing_id))
+        .cloned()
+        .collect();
+    for w in updated {
+        repo.save_workspace(&w)?;
+    }
+    let restacked = crate::swarm::restack_children(repo, rev_id, landing_id)?;
+    close_requests_for(repo, &rev_id)?;
+    let hooks = crate::hooks::fire(
+        repo,
+        &crate::hooks::Event::new(
+            repo,
+            "landed",
+            landing_id,
+            &landing,
+            json!({ "seq": seq + 1 }),
+        )?,
+    )?;
+    ok(
+        json!({
+            "stage": "landed", "revision": landing_id.to_hex(), "seq": seq + 1,
+            "merged": rev.parents.first() != Some(&head_id),
+            "semantic": semantic_resolved,
+            "attestations": cited.len(),
+            "ran": landing_ran,
+            "hooks": hooks,
+            "restacked": restacked,
+        }),
+        &["status"],
+    )
 }
 
 /// Latest common ancestor of two revisions through `parents`, by minimal combined depth.
@@ -3019,18 +3226,26 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         if actor.kind != "daemon" {
             return Err(Error::verb("SCOPE", "only the owner rolls a target back"));
         }
-        let why = arg_str(args, "reason").unwrap_or("rolled back on request").to_string();
+        let why = arg_str(args, "reason")
+            .unwrap_or("rolled back on request")
+            .to_string();
         let out = crate::delivery::rollback(repo, actor, target, &why)?;
         return ok(out, &["target"]);
     }
-    let change = arg_str(args, "change").ok_or_else(|| Error::verb("ARGS", "revert needs change or target"))?;
+    let change = arg_str(args, "change")
+        .ok_or_else(|| Error::verb("ARGS", "revert needs change or target"))?;
     let reason = arg_str(args, "reason").unwrap_or("reverted").to_string();
     let history = trunk_history(repo, 1000)?;
     let (r_id, r) = history
         .iter()
         .find(|(_, r)| r.id.matches_prefix(change))
         .cloned()
-        .ok_or_else(|| Error::verb("NOT_FOUND", format!("change {change} has not landed on trunk")))?;
+        .ok_or_else(|| {
+            Error::verb(
+                "NOT_FOUND",
+                format!("change {change} has not landed on trunk"),
+            )
+        })?;
     let before_id = *r
         .parents
         .first()
@@ -3049,11 +3264,24 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let (_, base_idx) = crate::semantic::index_for_snapshot(repo.store(), &r_snap_id)?;
     let (a_idx_id, a_idx) = crate::semantic::index_for_snapshot(repo.store(), &head_snap_id)?;
     let (_, b_idx) = crate::semantic::index_for_snapshot(repo.store(), &before_snap_id)?;
-    let tm = crate::semantic::merge_trees(repo.store(), &base, &a, &b, Some(&base_idx), &a_idx, &b_idx, &[], &[])?;
+    let tm = crate::semantic::merge_trees(
+        repo.store(),
+        &base,
+        &a,
+        &b,
+        Some(&base_idx),
+        &a_idx,
+        &b_idx,
+        &[],
+        &[],
+    )?;
     if !tm.conflicts.is_empty() {
         return Err(Error::verb(
             "CONFLICT",
-            format!("later changes built on this one; reverting conflicts on: {}", tm.conflicts.join(", ")),
+            format!(
+                "later changes built on this one; reverting conflicts on: {}",
+                tm.conflicts.join(", ")
+            ),
         ));
     }
     let root = tree::build(repo.store(), &tm.flat)?;
@@ -3065,7 +3293,9 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         env: None,
         index: Some(idx),
     })?;
-    let original_author = repo.principal_name(&r.author).unwrap_or_else(|| r.author.to_letters());
+    let original_author = repo
+        .principal_name(&r.author)
+        .unwrap_or_else(|| r.author.to_letters());
     let rev = Revision {
         id: EntityId::random(),
         prev: None,
@@ -3073,7 +3303,10 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         parents: vec![head_id],
         intent: r.intent,
         title: format!("revert: {}", r.title),
-        body: Some(format!("reverts change {} by {original_author}: {reason}", r.id.to_letters())),
+        body: Some(format!(
+            "reverts change {} by {original_author}: {reason}",
+            r.id.to_letters()
+        )),
         author: actor.principal(),
         time: now(),
         ops: None,
@@ -3094,7 +3327,11 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 None => Cbor::Text(String::new()),
             },
         },
-        body: format!("change {} ({}) was reverted: {reason}. Investigate and land a fix.", r.id.to_letters(), r.title),
+        body: format!(
+            "change {} ({}) was reverted: {reason}. Investigate and land a fix.",
+            r.id.to_letters(),
+            r.title
+        ),
         anchor: None,
         confidence: 1000,
         author: actor.principal(),
@@ -3114,9 +3351,17 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         build::args_with_idem(idem_from(args), BTreeMap::new()),
         vec![
             Effect::Put { id: rev_id },
-            Effect::Point { entity: rev.id, to: rev_id, from: None },
+            Effect::Point {
+                entity: rev.id,
+                to: rev_id,
+                from: None,
+            },
             Effect::Put { id: task_id },
-            Effect::Point { entity: task.id, to: task_id, from: None },
+            Effect::Point {
+                entity: task.id,
+                to: task_id,
+                from: None,
+            },
         ],
         now(),
     )?;
@@ -3152,13 +3397,19 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
             &actor.signer,
             actor.cap,
             "promote",
-            build::args_with_idem(EntityId::random().0, BTreeMap::from([("to".to_string(), Cbor::Text("proposed".into()))])),
+            build::args_with_idem(
+                EntityId::random().0,
+                BTreeMap::from([("to".to_string(), Cbor::Text("proposed".into()))]),
+            ),
             vec![Effect::Propose { rev: rev_id }],
             now(),
         )?;
         repo.commit_op(&op)?;
         actor.workspace = Some(ws_id);
-        Outcome { result: json!({ "stage": "proposed" }), next: vec![] }
+        Outcome {
+            result: json!({ "stage": "proposed" }),
+            next: vec![],
+        }
     };
     ok(
         json!({
@@ -3178,7 +3429,10 @@ fn land_all(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let view = repo.log.current_view()?;
     let coordinator = view.lines.get("trunk").map(|l| l.coordinator);
     if Some(actor.principal()) != coordinator {
-        return Err(Error::verb("SCOPE", "only the trunk coordinator lands the frontier"));
+        return Err(Error::verb(
+            "SCOPE",
+            "only the trunk coordinator lands the frontier",
+        ));
     }
     let vs = ViewState::new(repo.store());
     let landed = landed_revisions(repo.store(), &view)?;
@@ -3211,7 +3465,12 @@ fn land_all(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             Some(cur) if cur != rev_id => (cur, repo.store().get::<Revision>(&cur)?),
             _ => (rev_id, rev),
         };
-        let Some(ws) = repo.workspaces.iter().find(|w| w.current == Some(rev_id)).cloned() else {
+        let Some(ws) = repo
+            .workspaces
+            .iter()
+            .find(|w| w.current == Some(rev_id))
+            .cloned()
+        else {
             results.push(json!({ "change": rev.id.to_letters(), "title": rev.title, "landed": false, "why": "no workspace holds this revision" }));
             continue;
         };
@@ -3234,7 +3493,11 @@ fn land_all(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         }
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let per_hour = if elapsed_ms > 0 { (landed_n as f64) * 3_600_000.0 / (elapsed_ms as f64) } else { 0.0 };
+    let per_hour = if elapsed_ms > 0 {
+        (landed_n as f64) * 3_600_000.0 / (elapsed_ms as f64)
+    } else {
+        0.0
+    };
     ok(
         json!({
             "landed": landed_n, "considered": results.len(), "elapsed_ms": elapsed_ms,
@@ -3250,14 +3513,22 @@ fn plan_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
     let list = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(Json::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let mut paths = list("paths");
     if paths.is_empty() {
         paths.push("**".into());
     }
-    let n = args.get("agents").and_then(Json::as_u64).unwrap_or(8).clamp(1, 500) as usize;
+    let n = args
+        .get("agents")
+        .and_then(Json::as_u64)
+        .unwrap_or(8)
+        .clamp(1, 500) as usize;
     let mut names = list("names");
     if names.is_empty() {
         names = (1..=n).map(|i| format!("agent{i:02}")).collect();
@@ -3272,7 +3543,8 @@ fn revoke_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner revokes"));
     }
-    let name = arg_str(args, "name").ok_or_else(|| Error::verb("ARGS", "revoke needs --name <agent>"))?;
+    let name =
+        arg_str(args, "name").ok_or_else(|| Error::verb("ARGS", "revoke needs --name <agent>"))?;
     let agent = repo.agent_id(name)?;
     let result = crate::swarm::revoke_agent(repo, actor, agent)?;
     ok(result, &["status"])
@@ -3289,7 +3561,10 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         .cloned()
         .unwrap_or_default();
     if candidates.is_empty() {
-        return Err(Error::verb("ARGS", "try needs candidates: [{path, content} | {path, old, new}, ...]"));
+        return Err(Error::verb(
+            "ARGS",
+            "try needs candidates: [{path, content} | {path, old, new}, ...]",
+        ));
     }
     let (cur_id, cur) = current_revision(repo, &ws)?;
     let (cur_snap_id, cur_snap) = root_snapshot(repo, &cur)?;
@@ -3300,27 +3575,41 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let mut edits: Vec<Option<(String, Vec<u8>)>> = Vec::new();
     for (i, c) in candidates.iter().enumerate() {
         let started = std::time::Instant::now();
-        let dir = paths::workspaces_dir_for(&repo.repo_id).join(format!("try-{}-{i}", ws.id.to_letters()));
+        let dir = paths::workspaces_dir_for(&repo.repo_id)
+            .join(format!("try-{}-{i}", ws.id.to_letters()));
         let _ = std::fs::remove_dir_all(&dir);
         fs::materialize(repo.store(), &cur_snap.root, &dir, false)?;
-        let path = c.get("path").and_then(Json::as_str).ok_or_else(|| Error::verb("ARGS", format!("candidate {i} needs path")))?;
+        let path = c
+            .get("path")
+            .and_then(Json::as_str)
+            .ok_or_else(|| Error::verb("ARGS", format!("candidate {i} needs path")))?;
         if path.contains("..") {
             return Err(Error::verb("ARGS", "path may not contain .."));
         }
         let full = dir.join(path);
         let new_text: Vec<u8> = if let Some(content) = c.get("content").and_then(Json::as_str) {
             content.as_bytes().to_vec()
-        } else if let (Some(old), Some(new)) = (c.get("old").and_then(Json::as_str), c.get("new").and_then(Json::as_str)) {
-            let text = std::fs::read_to_string(&full).map_err(|e| Error::verb("EDIT", format!("{path}: {e}")))?;
+        } else if let (Some(old), Some(new)) = (
+            c.get("old").and_then(Json::as_str),
+            c.get("new").and_then(Json::as_str),
+        ) {
+            let text = std::fs::read_to_string(&full)
+                .map_err(|e| Error::verb("EDIT", format!("{path}: {e}")))?;
             if !text.contains(old) {
                 let _ = std::fs::remove_dir_all(&dir);
-                ranked.push((u64::MAX, json!({ "candidate": i, "error": format!("old text not found in {path}") })));
+                ranked.push((
+                    u64::MAX,
+                    json!({ "candidate": i, "error": format!("old text not found in {path}") }),
+                ));
                 edits.push(None);
                 continue;
             }
             text.replacen(old, new, 1).into_bytes()
         } else {
-            return Err(Error::verb("ARGS", format!("candidate {i} needs content, or old and new")));
+            return Err(Error::verb(
+                "ARGS",
+                format!("candidate {i} needs content, or old and new"),
+            ));
         };
         if let Some(d) = full.parent() {
             std::fs::create_dir_all(d)?;
@@ -3328,18 +3617,37 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         std::fs::write(&full, &new_text)?;
         edits.push(Some((path.to_string(), new_text)));
         repo.store().begin_batch();
-        let out = fs::snapshot_dir(repo.store(), &dir, &rules, actor.write_paths.as_deref(), Some(&base_flat));
+        let out = fs::snapshot_dir(
+            repo.store(),
+            &dir,
+            &rules,
+            actor.write_paths.as_deref(),
+            Some(&base_flat),
+        );
         repo.store().end_batch()?;
         let out = out?;
         let _ = std::fs::remove_dir_all(&dir);
         if out.tree == cur_snap.root {
-            ranked.push((u64::MAX - 1, json!({ "candidate": i, "path": path, "unchanged": true })));
+            ranked.push((
+                u64::MAX - 1,
+                json!({ "candidate": i, "path": path, "unchanged": true }),
+            ));
             continue;
         }
-        let nodes = crate::semantic::build_nodes(repo.store(), &out.flat, Some((&base_flat, &cur_idx)))?;
+        let nodes =
+            crate::semantic::build_nodes(repo.store(), &out.flat, Some((&base_flat, &cur_idx)))?;
         let index_id = crate::semantic::put_index(repo.store(), out.tree, vec![cur_idx_id], nodes)?;
-        let snap_id = repo.store().put(&Snapshot { root: out.tree, rules: cur_snap.rules, env: None, index: Some(index_id) })?;
-        let title = c.get("title").and_then(Json::as_str).map(str::to_string).unwrap_or_else(|| format!("try: candidate {i}"));
+        let snap_id = repo.store().put(&Snapshot {
+            root: out.tree,
+            rules: cur_snap.rules,
+            env: None,
+            index: Some(index_id),
+        })?;
+        let title = c
+            .get("title")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("try: candidate {i}"));
         let rev = Revision {
             id: EntityId::random(),
             prev: None,
@@ -3351,7 +3659,11 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             author: actor.principal(),
             time: now(),
             ops: None,
-            flags: if out.flags.is_empty() { None } else { Some(out.flags.clone()) },
+            flags: if out.flags.is_empty() {
+                None
+            } else {
+                Some(out.flags.clone())
+            },
         };
         let rev_id = repo.store().put(&rev)?;
         let op = build::build_op(
@@ -3360,18 +3672,40 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             actor.cap,
             "try",
             build::args_with_idem(EntityId::random().0, BTreeMap::new()),
-            vec![Effect::Put { id: rev_id }, Effect::Point { entity: rev.id, to: rev_id, from: None }],
+            vec![
+                Effect::Put { id: rev_id },
+                Effect::Point {
+                    entity: rev.id,
+                    to: rev_id,
+                    from: None,
+                },
+            ],
             now(),
         )?;
         repo.commit_op(&op)?;
         let ran = run_verifiers(repo, &rev_id, &rev, false, &[])?;
         let (_, risk) = crate::risk::ensure_attested(repo, &rev_id, &rev)?;
         let (met, unmet, _) = standard_status(repo, &rev_id, &rev)?;
-        let failed: usize = ran.iter().filter_map(|r| r.get("failed").and_then(Json::as_u64)).sum::<u64>() as usize;
-        let passed: usize = ran.iter().filter_map(|r| r.get("passed").and_then(Json::as_u64)).sum::<u64>() as usize;
-        let changed = crate::verifiers::changed_units(&cur_idx, &repo.store().get::<tessra_core::object::NodeIndex>(&index_id)?).len();
+        let failed: usize = ran
+            .iter()
+            .filter_map(|r| r.get("failed").and_then(Json::as_u64))
+            .sum::<u64>() as usize;
+        let passed: usize = ran
+            .iter()
+            .filter_map(|r| r.get("passed").and_then(Json::as_u64))
+            .sum::<u64>() as usize;
+        let changed = crate::verifiers::changed_units(
+            &cur_idx,
+            &repo
+                .store()
+                .get::<tessra_core::object::NodeIndex>(&index_id)?,
+        )
+        .len();
         // Lower is better: unmet clauses, then failed tests, then risk, then size.
-        let score = (unmet.len() as u64) * 1_000_000 + (failed as u64) * 10_000 + (risk.score as u64) * 100 + changed as u64;
+        let score = (unmet.len() as u64) * 1_000_000
+            + (failed as u64) * 10_000
+            + (risk.score as u64) * 100
+            + changed as u64;
         ranked.push((score, json!({
             "candidate": i, "title": title, "path": path, "revision": rev_id.to_hex(), "change": rev.id.to_letters(),
             "met": met, "unmet": unmet.iter().map(|u| json!({ "clause": u.clause, "reason": u.reason })).collect::<Vec<_>>(),
@@ -3409,10 +3743,16 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
 fn needs_human(u: &standard::Unmet) -> bool {
     // An approval clause always asks; a judged clause only when a judge
     // said no, not while the judges have yet to look.
-    u.clause.contains("approved(") || (u.clause.contains("judge(") && u.reason.starts_with("a judge said no"))
+    u.clause.contains("approved(")
+        || (u.clause.contains("judge(") && u.reason.starts_with("a judge said no"))
 }
 
-fn ensure_approval_request(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision, unmet: &[standard::Unmet]) -> Result<Option<Json>> {
+fn ensure_approval_request(
+    repo: &mut Repo,
+    rev_id: &ObjectId,
+    rev: &Revision,
+    unmet: &[standard::Unmet],
+) -> Result<Option<Json>> {
     if !unmet.iter().any(needs_human) {
         return Ok(None);
     }
@@ -3423,11 +3763,17 @@ fn ensure_approval_request(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision, u
     let mut existing: Option<EntityId> = None;
     for (id, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Some(bytes) = repo.store().get_bytes(&oid)? else { continue };
+        let Some(bytes) = repo.store().get_bytes(&oid)? else {
+            continue;
+        };
         match cbor::peek_tag(&bytes).ok().as_deref() {
             Some("memory") => {
                 if let Ok(m) = cbor::decode::<Memory>(&bytes) {
-                    if m.kind == "question" && m.status == "active" && m.links.iter().flatten().any(|l| l == rev_id) && m.body.starts_with("Approval needed") {
+                    if m.kind == "question"
+                        && m.status == "active"
+                        && m.links.iter().flatten().any(|l| l == rev_id)
+                        && m.body.starts_with("Approval needed")
+                    {
                         existing = Some(id);
                     }
                 }
@@ -3440,15 +3786,25 @@ fn ensure_approval_request(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision, u
             _ => {}
         }
     }
-    let clauses: Vec<String> = unmet.iter().filter(|u| needs_human(u)).map(|u| format!("{}: {}", u.clause, u.reason)).collect();
+    let clauses: Vec<String> = unmet
+        .iter()
+        .filter(|u| needs_human(u))
+        .map(|u| format!("{}: {}", u.clause, u.reason))
+        .collect();
     let judges = judges_reasoning(repo, rev_id, rev)?;
     let risk = crate::risk::ensure_attested(repo, rev_id, rev)?.1;
-    let author = repo.principal_name(&rev.author).unwrap_or_else(|| rev.author.to_letters());
+    let author = repo
+        .principal_name(&rev.author)
+        .unwrap_or_else(|| rev.author.to_letters());
     let request_id = match existing {
         Some(id) => id,
         None => {
             let id = EntityId::random();
-            let humans: Vec<String> = channels.iter().flat_map(|c| c.principals.iter()).filter_map(|p| repo.principal_name(p)).collect();
+            let humans: Vec<String> = channels
+                .iter()
+                .flat_map(|c| c.principals.iter())
+                .filter_map(|p| repo.principal_name(p))
+                .collect();
             let m = Memory {
                 id,
                 prev: None,
@@ -3481,7 +3837,14 @@ fn ensure_approval_request(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision, u
                 None,
                 "question",
                 build::args_with_idem(EntityId::random().0, BTreeMap::new()),
-                vec![Effect::Put { id: oid }, Effect::Point { entity: id, to: oid, from: None }],
+                vec![
+                    Effect::Put { id: oid },
+                    Effect::Point {
+                        entity: id,
+                        to: oid,
+                        from: None,
+                    },
+                ],
                 now(),
             )?;
             repo.commit_op(&op)?;
@@ -3499,7 +3862,9 @@ fn ensure_approval_request(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision, u
     } else {
         Vec::new()
     };
-    Ok(Some(json!({ "request": request_id.to_letters(), "delivered": delivered, "reply": payload["reply"] })))
+    Ok(Some(
+        json!({ "request": request_id.to_letters(), "delivered": delivered, "reply": payload["reply"] }),
+    ))
 }
 
 /// Deliver a message to every channel, or to one by name: an inbox gets a
@@ -3511,12 +3876,21 @@ pub fn deliver_to_channels(repo: &Repo, payload: &Json, only: Option<&str>) -> R
     let stamp = now();
     for (_, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Some(bytes) = repo.store().get_bytes(&oid)? else { continue };
+        let Some(bytes) = repo.store().get_bytes(&oid)? else {
+            continue;
+        };
         if cbor::peek_tag(&bytes).ok().as_deref() != Some("channel") {
             continue;
         }
-        let Ok(c) = cbor::decode::<tessra_core::object::Channel>(&bytes) else { continue };
-        let name = c.config.get("name").and_then(|v| v.as_text()).unwrap_or("channel").to_string();
+        let Ok(c) = cbor::decode::<tessra_core::object::Channel>(&bytes) else {
+            continue;
+        };
+        let name = c
+            .config
+            .get("name")
+            .and_then(|v| v.as_text())
+            .unwrap_or("channel")
+            .to_string();
         if only.is_some_and(|o| o != name) {
             continue;
         }
@@ -3524,10 +3898,22 @@ pub fn deliver_to_channels(repo: &Repo, payload: &Json, only: Option<&str>) -> R
             .get("request")
             .and_then(Json::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| format!("{}-{stamp}", payload.get("event").and_then(Json::as_str).unwrap_or("message")));
+            .unwrap_or_else(|| {
+                format!(
+                    "{}-{stamp}",
+                    payload
+                        .get("event")
+                        .and_then(Json::as_str)
+                        .unwrap_or("message")
+                )
+            });
         let outcome = match c.kind.as_str() {
             "inbox" => {
-                let dir = c.config.get("path").and_then(|v| v.as_text()).unwrap_or(".");
+                let dir = c
+                    .config
+                    .get("path")
+                    .and_then(|v| v.as_text())
+                    .unwrap_or(".");
                 let p = std::path::Path::new(dir).join(format!("{file_stem}.json"));
                 std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&p, serde_json::to_vec_pretty(payload).unwrap_or_default()))
                     .map(|_| json!({ "channel": name, "kind": "inbox", "file": p.display().to_string() }))
@@ -3536,9 +3922,14 @@ pub fn deliver_to_channels(repo: &Repo, payload: &Json, only: Option<&str>) -> R
             "webhook" => {
                 let url = c.config.get("url").and_then(|v| v.as_text()).unwrap_or("");
                 let body = serde_json::to_vec(payload).unwrap_or_default();
-                crate::hooks::http_post(url, &[("Content-Type".into(), "application/json".into())], &body, std::time::Duration::from_secs(10))
-                    .map(|(status, _)| json!({ "channel": name, "kind": "webhook", "status": status }))
-                    .map_err(|e| e.to_string())
+                crate::hooks::http_post(
+                    url,
+                    &[("Content-Type".into(), "application/json".into())],
+                    &body,
+                    std::time::Duration::from_secs(10),
+                )
+                .map(|(status, _)| json!({ "channel": name, "kind": "webhook", "status": status }))
+                .map_err(|e| e.to_string())
             }
             other => Err(format!("channel kind {other} is not available yet")),
         };
@@ -3557,20 +3948,38 @@ fn close_requests_for(repo: &mut Repo, rev_id: &ObjectId) -> Result<()> {
     let mut effects = Vec::new();
     for (id, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Ok(m) = repo.store().get::<Memory>(&oid) else { continue };
-        if m.kind == "question" && m.status == "active" && m.body.starts_with("Approval needed") && m.links.iter().flatten().any(|l| l == rev_id) {
+        let Ok(m) = repo.store().get::<Memory>(&oid) else {
+            continue;
+        };
+        if m.kind == "question"
+            && m.status == "active"
+            && m.body.starts_with("Approval needed")
+            && m.links.iter().flatten().any(|l| l == rev_id)
+        {
             let mut closed = m.clone();
             closed.prev = Some(oid);
             closed.status = "resolved".into();
             closed.body = format!("{} Landed.", m.body);
             let new_oid = repo.store().put(&closed)?;
             effects.push(Effect::Put { id: new_oid });
-            effects.push(Effect::Point { entity: id, to: new_oid, from: Some(Pointer::Id(oid).to_value()) });
+            effects.push(Effect::Point {
+                entity: id,
+                to: new_oid,
+                from: Some(Pointer::Id(oid).to_value()),
+            });
         }
     }
     if !effects.is_empty() {
         let signer = repo.daemon_signer();
-        let op = build::build_op(&repo.log, &signer, None, "question", build::args_with_idem(EntityId::random().0, BTreeMap::new()), effects, now())?;
+        let op = build::build_op(
+            &repo.log,
+            &signer,
+            None,
+            "question",
+            build::args_with_idem(EntityId::random().0, BTreeMap::new()),
+            effects,
+            now(),
+        )?;
         repo.commit_op(&op)?;
     }
     Ok(())
@@ -3589,12 +3998,16 @@ fn judges_reasoning(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Ve
                 continue;
             }
             let (conf, reasoning) = standard::judge_result(&a.result);
-            let verdict = matches!(a.result, Cbor::Bool(true)) || matches!(&a.result, Cbor::Map(m) if m.iter().any(|(k, v)| matches!(k, Cbor::Text(t) if t == "ok") && matches!(v, Cbor::Bool(true))));
-            let who = repo.principal_name(&a.verifier).unwrap_or_else(|| a.verifier.to_letters());
+            let verdict = matches!(a.result, Cbor::Bool(true))
+                || matches!(&a.result, Cbor::Map(m) if m.iter().any(|(k, v)| matches!(k, Cbor::Text(t) if t == "ok") && matches!(v, Cbor::Bool(true))));
+            let who = repo
+                .principal_name(&a.verifier)
+                .unwrap_or_else(|| a.verifier.to_letters());
             let model = {
                 let view = repo.log.current_view()?;
                 let vs = ViewState::new(repo.store());
-                tessra_oplog::verify::resolve_principal(repo.store(), &vs, &view, &a.verifier)?.and_then(|(_, p)| p.model)
+                tessra_oplog::verify::resolve_principal(repo.store(), &vs, &view, &a.verifier)?
+                    .and_then(|(_, p)| p.model)
             };
             out.push(json!({ "rubric": a.kind.trim_start_matches("judge."), "who": who, "model": model, "verdict": verdict, "confidence": conf, "reasoning": reasoning }));
         }
@@ -3606,7 +4019,15 @@ fn judges_reasoning(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Ve
 fn note_approval(unmet: &mut [standard::Unmet], request: &Option<Json>) {
     if let Some(r) = request {
         let id = r.get("request").and_then(Json::as_str).unwrap_or("");
-        let where_: Vec<String> = r.get("delivered").and_then(Json::as_array).map(|a| a.iter().filter_map(|d| d.get("channel").and_then(Json::as_str).map(str::to_string)).collect()).unwrap_or_default();
+        let where_: Vec<String> = r
+            .get("delivered")
+            .and_then(Json::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.get("channel").and_then(Json::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         for u in unmet.iter_mut() {
             if needs_human(u) {
                 u.reason = format!("{}; request {id}{}; a human replies with `tessra --as <name> approve --request {id}`", u.reason,
@@ -3622,7 +4043,8 @@ fn approve_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
     if actor.kind != "human" {
         return Err(Error::verb("SCOPE", "only a human principal approves; the owner grants one with `tessra grant --human <name>` and acts with `--as <name>`"));
     }
-    let request = arg_str(args, "request").ok_or_else(|| Error::verb("ARGS", "approve needs request"))?;
+    let request =
+        arg_str(args, "request").ok_or_else(|| Error::verb("ARGS", "approve needs request"))?;
     let decision = !args.get("no").and_then(Json::as_bool).unwrap_or(false);
     let note = arg_str(args, "note").map(str::to_string);
     let view = repo.log.current_view()?;
@@ -3640,12 +4062,22 @@ fn approve_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
             }
         }
     }
-    let (qid, q_oid, q) = found.ok_or_else(|| Error::verb("NOT_FOUND", format!("no approval request {request}")))?;
-    let rev_id = q.links.iter().flatten().next().copied().ok_or_else(|| Error::verb("REQUEST", "the request names no revision"))?;
+    let (qid, q_oid, q) =
+        found.ok_or_else(|| Error::verb("NOT_FOUND", format!("no approval request {request}")))?;
+    let rev_id = q
+        .links
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .ok_or_else(|| Error::verb("REQUEST", "the request names no revision"))?;
     let rev: Revision = repo.store().get(&rev_id)?;
     let mut scope = BTreeMap::from([
         ("request".to_string(), Cbor::Text(qid.to_letters())),
-        ("nonce".to_string(), Cbor::Bytes(EntityId::random().0.to_vec())),
+        (
+            "nonce".to_string(),
+            Cbor::Bytes(EntityId::random().0.to_vec()),
+        ),
     ]);
     if let Some(n) = &note {
         scope.insert("note".to_string(), Cbor::Text(n.clone()));
@@ -3669,8 +4101,18 @@ fn approve_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
     let att_id = repo.store().put(&att)?;
     let mut closed = q.clone();
     closed.prev = Some(q_oid);
-    closed.status = if decision { "resolved".into() } else { "declined".into() };
-    closed.body = format!("{} Answered by {}: {}{}", q.body, repo.principal_name(&actor.principal()).unwrap_or_default(), if decision { "approved" } else { "declined" }, note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default());
+    closed.status = if decision {
+        "resolved".into()
+    } else {
+        "declined".into()
+    };
+    closed.body = format!(
+        "{} Answered by {}: {}{}",
+        q.body,
+        repo.principal_name(&actor.principal()).unwrap_or_default(),
+        if decision { "approved" } else { "declined" },
+        note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default()
+    );
     let closed_oid = repo.store().put(&closed)?;
     let op = build::build_op(
         &repo.log,
@@ -3681,7 +4123,11 @@ fn approve_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
         vec![
             Effect::Put { id: att_id },
             Effect::Put { id: closed_oid },
-            Effect::Point { entity: qid, to: closed_oid, from: Some(Pointer::Id(q_oid).to_value()) },
+            Effect::Point {
+                entity: qid,
+                to: closed_oid,
+                from: Some(Pointer::Id(q_oid).to_value()),
+            },
         ],
         now(),
     )?;
@@ -3705,29 +4151,45 @@ fn channel_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
                 out.push(json!({ "id": id.to_letters(), "kind": c.kind, "name": c.config.get("name").and_then(|v| v.as_text()), "config": cbor_to_json(&Cbor::Map(c.config.iter().map(|(k, v)| (Cbor::Text(k.clone()), v.clone())).collect())), "principals": c.principals.iter().map(|p| repo.principal_name(p).unwrap_or_else(|| p.to_letters())).collect::<Vec<_>>(), "signing": c.signing }));
             }
         }
-        return ok(json!({ "channels": out }), &["channel --name oncall --kind inbox --path <dir> --principals <human>"]);
+        return ok(
+            json!({ "channels": out }),
+            &["channel --name oncall --kind inbox --path <dir> --principals <human>"],
+        );
     }
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner defines channels"));
     }
     let name = name.unwrap_or_default();
     let kind = arg_str(args, "kind").unwrap_or("inbox");
-    let mut config: BTreeMap<String, Cbor> = BTreeMap::from([("name".to_string(), Cbor::Text(name.into()))]);
+    let mut config: BTreeMap<String, Cbor> =
+        BTreeMap::from([("name".to_string(), Cbor::Text(name.into()))]);
     match kind {
         "inbox" => {
-            let p = arg_str(args, "path").ok_or_else(|| Error::verb("ARGS", "an inbox channel needs path"))?;
+            let p = arg_str(args, "path")
+                .ok_or_else(|| Error::verb("ARGS", "an inbox channel needs path"))?;
             config.insert("path".into(), Cbor::Text(p.into()));
         }
         "webhook" => {
-            let u = arg_str(args, "url").ok_or_else(|| Error::verb("ARGS", "a webhook channel needs url"))?;
+            let u = arg_str(args, "url")
+                .ok_or_else(|| Error::verb("ARGS", "a webhook channel needs url"))?;
             config.insert("url".into(), Cbor::Text(u.into()));
         }
-        other => return Err(Error::verb("ARGS", format!("channel kind {other}; use inbox or webhook"))),
+        other => {
+            return Err(Error::verb(
+                "ARGS",
+                format!("channel kind {other}; use inbox or webhook"),
+            ))
+        }
     }
     let principals: Vec<EntityId> = args
         .get("principals")
         .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|n| repo.open_external(n).ok().map(|a| a.principal())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|n| repo.open_external(n).ok().map(|a| a.principal()))
+                .collect()
+        })
         .unwrap_or_default();
     let c = tessra_core::object::Channel {
         id: EntityId::random(),
@@ -3745,11 +4207,21 @@ fn channel_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
         actor.cap,
         "channel",
         build::args_with_idem(idem_from(args), BTreeMap::new()),
-        vec![Effect::Put { id: oid }, Effect::Point { entity: c.id, to: oid, from: None }],
+        vec![
+            Effect::Put { id: oid },
+            Effect::Point {
+                entity: c.id,
+                to: oid,
+                from: None,
+            },
+        ],
         now(),
     )?;
     repo.commit_op(&op)?;
-    ok(json!({ "channel": c.id.to_letters(), "name": name, "kind": kind, "principals": principals.len() }), &["standard --when high --require 'approved(human)'"])
+    ok(
+        json!({ "channel": c.id.to_letters(), "name": name, "kind": kind, "principals": principals.len() }),
+        &["standard --when high --require 'approved(human)'"],
+    )
 }
 
 /// JSON to CBOR for attestation results and hook arguments.
@@ -3763,7 +4235,11 @@ fn json_to_cbor(v: &Json) -> Cbor {
         },
         Json::String(s) => Cbor::Text(s.clone()),
         Json::Array(a) => Cbor::Array(a.iter().map(json_to_cbor).collect()),
-        Json::Object(o) => Cbor::Map(o.iter().map(|(k, v)| (Cbor::Text(k.clone()), json_to_cbor(v))).collect()),
+        Json::Object(o) => Cbor::Map(
+            o.iter()
+                .map(|(k, v)| (Cbor::Text(k.clone()), json_to_cbor(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -3774,7 +4250,11 @@ fn config_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
     let sets: Vec<String> = args
         .get("set")
         .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let mut config = repo.config();
     if !sets.is_empty() {
@@ -3782,7 +4262,9 @@ fn config_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
             return Err(Error::verb("SCOPE", "only the owner sets configuration"));
         }
         for kv in &sets {
-            let (k, v) = kv.split_once('=').ok_or_else(|| Error::verb("ARGS", format!("expected key=value, got {kv}")))?;
+            let (k, v) = kv
+                .split_once('=')
+                .ok_or_else(|| Error::verb("ARGS", format!("expected key=value, got {kv}")))?;
             let value = match v {
                 "true" => Cbor::Bool(true),
                 "false" => Cbor::Bool(false),
@@ -3792,7 +4274,9 @@ fn config_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
                 },
             };
             if let Some(kind) = k.strip_prefix("verifiers.") {
-                let entry = config.entry("verifiers".to_string()).or_insert_with(|| Cbor::Map(vec![]));
+                let entry = config
+                    .entry("verifiers".to_string())
+                    .or_insert_with(|| Cbor::Map(vec![]));
                 if let Cbor::Map(m) = entry {
                     m.retain(|(key, _)| !matches!(key, Cbor::Text(t) if t == kind));
                     m.push((Cbor::Text(kind.to_string()), value));
@@ -3820,8 +4304,15 @@ fn target_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
         for (id, _, t) in crate::delivery::all_targets(repo)? {
             out.push(crate::delivery::describe_target(repo, &id, &t)?);
         }
-        let releases: Vec<Json> = crate::delivery::releases(repo)?.iter().take(5).map(|(id, r)| crate::delivery::describe_release(repo, id, r)).collect();
-        return ok(json!({ "targets": out, "releases": releases }), &["target --name prod --deployer 'dir(<path>)' --observer 'run(<cmd>)'"]);
+        let releases: Vec<Json> = crate::delivery::releases(repo)?
+            .iter()
+            .take(5)
+            .map(|(id, r)| crate::delivery::describe_release(repo, id, r))
+            .collect();
+        return ok(
+            json!({ "targets": out, "releases": releases }),
+            &["target --name prod --deployer 'dir(<path>)' --observer 'run(<cmd>)'"],
+        );
     };
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner defines targets"));
@@ -3829,18 +4320,39 @@ fn target_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
     let list = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(Json::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let canary = args.get("canary").and_then(Json::as_u64).unwrap_or(10);
-    let out = crate::delivery::create_target(repo, actor, name, deployer, &list("observers"), canary, &list("secrets"))?;
-    ok(out, &["standard --target <name> --require 'observe(error_rate, max=50)'", "promote --to <name> --slice canary"])
+    let out = crate::delivery::create_target(
+        repo,
+        actor,
+        name,
+        deployer,
+        &list("observers"),
+        canary,
+        &list("secrets"),
+    )?;
+    ok(
+        out,
+        &[
+            "standard --target <name> --require 'observe(error_rate, max=50)'",
+            "promote --to <name> --slice canary",
+        ],
+    )
 }
 
 /// Cut a release of the trunk head (owner or coordinator).
 fn release_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let Some(name) = arg_str(args, "name") else {
-        let releases: Vec<Json> = crate::delivery::releases(repo)?.iter().map(|(id, r)| crate::delivery::describe_release(repo, id, r)).collect();
+        let releases: Vec<Json> = crate::delivery::releases(repo)?
+            .iter()
+            .map(|(id, r)| crate::delivery::describe_release(repo, id, r))
+            .collect();
         return ok(json!({ "releases": releases }), &["release --name v1"]);
     };
     let out = crate::delivery::cut_release(repo, actor, name)?;
@@ -3850,9 +4362,14 @@ fn release_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
 /// Observe a target: run its observers, attest the signals, evaluate its
 /// standard, and roll back if an observe clause trips.
 fn observe_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
-    let target = arg_str(args, "target").ok_or_else(|| Error::verb("ARGS", "observe needs target"))?;
+    let target =
+        arg_str(args, "target").ok_or_else(|| Error::verb("ARGS", "observe needs target"))?;
     let out = crate::delivery::observe(repo, actor, target)?;
-    let next: &[&str] = if out["tripped"].as_bool().unwrap_or(false) { &["target", "query --kind memory --kinds task"] } else { &["promote --to <target> --slice all"] };
+    let next: &[&str] = if out["tripped"].as_bool().unwrap_or(false) {
+        &["target", "query --kind memory --kinds task"]
+    } else {
+        &["promote --to <target> --slice all"]
+    };
     ok(out, next)
 }
 
@@ -3870,10 +4387,22 @@ fn import_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
 /// The environment of a workspace: toolchain versions, lockfile hashes,
 /// and a tree per configured state path. Returns the stored environment,
 /// the object, and a description of the state captured.
-fn capture_environment(repo: &Repo, dir: &std::path::Path) -> Result<(ObjectId, tessra_core::object::Environment, Vec<Json>)> {
+fn capture_environment(
+    repo: &Repo,
+    dir: &std::path::Path,
+) -> Result<(ObjectId, tessra_core::object::Environment, Vec<Json>)> {
     let paths: Vec<String> = match repo.config().get("state_paths") {
-        Some(Cbor::Text(t)) => t.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
-        _ => vec!["target".into(), "data".into(), ".venv".into(), "node_modules".into()],
+        Some(Cbor::Text(t)) => t
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => vec![
+            "target".into(),
+            "data".into(),
+            ".venv".into(),
+            "node_modules".into(),
+        ],
     };
     let mut state = Vec::new();
     let mut state_json = Vec::new();
@@ -3888,26 +4417,54 @@ fn capture_environment(repo: &Repo, dir: &std::path::Path) -> Result<(ObjectId, 
         }
     }
     let probe = |cmd: &str| -> Option<String> {
-        let out = crate::quiet(std::process::Command::new(cmd)).arg("--version").output().ok()?;
-        let s = String::from_utf8_lossy(&out.stdout).trim().lines().next().unwrap_or("").to_string();
-        if s.is_empty() { None } else { Some(s) }
+        let out = crate::quiet(std::process::Command::new(cmd))
+            .arg("--version")
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     };
     let mut tools = BTreeMap::new();
     if dir.join("Cargo.toml").exists() {
         for t in ["cargo", "rustc"] {
-            if let Some(v) = probe(t) { tools.insert(t.to_string(), v); }
+            if let Some(v) = probe(t) {
+                tools.insert(t.to_string(), v);
+            }
         }
     }
     if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
-        if let Some(v) = probe("python") { tools.insert("python".into(), v); }
+        if let Some(v) = probe("python") {
+            tools.insert("python".into(), v);
+        }
     }
     if dir.join("package.json").exists() {
-        if let Some(v) = probe("node") { tools.insert("node".into(), v); }
+        if let Some(v) = probe("node") {
+            tools.insert("node".into(), v);
+        }
     }
     let mut locks = Vec::new();
-    for name in ["Cargo.lock", "package-lock.json", "poetry.lock", "uv.lock", "requirements.txt", "go.sum"] {
+    for name in [
+        "Cargo.lock",
+        "package-lock.json",
+        "poetry.lock",
+        "uv.lock",
+        "requirements.txt",
+        "go.sum",
+    ] {
         if let Ok(bytes) = std::fs::read(dir.join(name)) {
-            locks.push((Cbor::Text(name.into()), Cbor::Text(blake3::hash(&bytes).to_hex().to_string())));
+            locks.push((
+                Cbor::Text(name.into()),
+                Cbor::Text(blake3::hash(&bytes).to_hex().to_string()),
+            ));
         }
     }
     let env = tessra_core::object::Environment {
@@ -3927,18 +4484,29 @@ fn capture_environment(repo: &Repo, dir: &std::path::Path) -> Result<(ObjectId, 
 
 /// Materialize the state paths a snapshot's environment carries into a directory.
 fn restore_state(repo: &Repo, snap: &Snapshot, dir: &std::path::Path) -> Result<Vec<Json>> {
-    let Some(env_id) = snap.env else { return Ok(Vec::new()) };
+    let Some(env_id) = snap.env else {
+        return Ok(Vec::new());
+    };
     let env: tessra_core::object::Environment = repo.store().get(&env_id)?;
     let mut out = Vec::new();
     if let Some(Cbor::Array(list)) = env.extra.as_ref().and_then(|e| e.get("state")) {
         for item in list {
             let Cbor::Map(m) = item else { continue };
-            let get = |k: &str| m.iter().find(|(key, _)| matches!(key, Cbor::Text(t) if t == k)).map(|(_, v)| v);
-            let (Some(Cbor::Text(path)), Some(Cbor::Bytes(tree))) = (get("path"), get("tree")) else { continue };
+            let get = |k: &str| {
+                m.iter()
+                    .find(|(key, _)| matches!(key, Cbor::Text(t) if t == k))
+                    .map(|(_, v)| v)
+            };
+            let (Some(Cbor::Text(path)), Some(Cbor::Bytes(tree))) = (get("path"), get("tree"))
+            else {
+                continue;
+            };
             if path.contains("..") {
                 continue;
             }
-            let Ok(tree_id) = ObjectId::from_slice(tree) else { continue };
+            let Ok(tree_id) = ObjectId::from_slice(tree) else {
+                continue;
+            };
             let target = dir.join(path);
             let n = fs::materialize(repo.store(), &tree_id, &target, false)?;
             out.push(json!({ "path": path, "files": n }));
@@ -3982,7 +4550,8 @@ fn bisect_probe(repo: &mut Repo, cx: &BisectCtx<'_>, i: usize) -> Result<(bool, 
     let (rid, r) = &cx.seq[i];
     let (snap_id, snap) = root_snapshot(repo, r)?;
     let (_, idx_i) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
-    let by_nid: HashMap<EntityId, &tessra_core::object::Node> = idx_i.nodes.iter().map(|n| (n.nid, n)).collect();
+    let by_nid: HashMap<EntityId, &tessra_core::object::Node> =
+        idx_i.nodes.iter().map(|n| (n.nid, n)).collect();
     let mut h = blake3::Hasher::new();
     h.update(cx.test.body.as_bytes());
     let mut bodies: Vec<ObjectId> = vec![cx.test.body];
@@ -4001,16 +4570,24 @@ fn bisect_probe(repo: &mut Repo, cx: &BisectCtx<'_>, i: usize) -> Result<(bool, 
     let fp = hex::encode(h.finalize().as_bytes());
     for (_, a) in vf::by_body(repo.store(), &cx.test.body)? {
         if a.kind == "test.result"
-            && a.scope.as_ref().and_then(|s| s.get("fingerprint")).and_then(|v| v.as_text()) == Some(fp.as_str())
+            && a.scope
+                .as_ref()
+                .and_then(|s| s.get("fingerprint"))
+                .and_then(|v| v.as_text())
+                == Some(fp.as_str())
         {
             return Ok((matches!(a.result, Cbor::Bool(true)), true));
         }
     }
-    let dir = vf::materialize_scratch(repo, &snap.root, &format!("bisect-{}", &snap_id.to_hex()[..12]))?;
-    let already_there = idx_i
-        .nodes
-        .iter()
-        .any(|n| n.path == cx.test.path && (n.nid == cx.test.nid || (n.kind == cx.test.kind && n.name == cx.test.name)));
+    let dir = vf::materialize_scratch(
+        repo,
+        &snap.root,
+        &format!("bisect-{}", &snap_id.to_hex()[..12]),
+    )?;
+    let already_there = idx_i.nodes.iter().any(|n| {
+        n.path == cx.test.path
+            && (n.nid == cx.test.nid || (n.kind == cx.test.kind && n.name == cx.test.name))
+    });
     if !already_there {
         let flat = tree::flatten(repo.store(), &snap.root)?;
         let text = flat
@@ -4019,16 +4596,31 @@ fn bisect_probe(repo: &mut Repo, cx: &BisectCtx<'_>, i: usize) -> Result<(bool, 
             .and_then(|x| repo.store().get_bytes(&x).ok().flatten())
             .unwrap_or_default();
         let nodes = crate::semantic::nodes_for_path(&idx_i, &cx.test.path);
-        let merged = vf::overlay_tests(&text, &nodes, &cx.current_text, &cx.current_nodes, &[&cx.test]);
+        let merged = vf::overlay_tests(
+            &text,
+            &nodes,
+            &cx.current_text,
+            &cx.current_nodes,
+            &[&cx.test],
+        );
         let full = dir.join(&cx.test.path);
         if let Some(d) = full.parent() {
             std::fs::create_dir_all(d)?;
         }
         std::fs::write(&full, merged)?;
     }
-    let out = vf::run(repo, &cx.tool, &dir, std::slice::from_ref(&cx.test.name), std::time::Duration::from_secs(600))?;
+    let out = vf::run(
+        repo,
+        &cx.tool,
+        &dir,
+        std::slice::from_ref(&cx.test.name),
+        std::time::Duration::from_secs(600),
+    )?;
     let _ = std::fs::remove_dir_all(&dir);
-    let passed = out.tests.iter().any(|(t, okk)| *okk && vf::test_matches(t, &cx.test.name));
+    let passed = out
+        .tests
+        .iter()
+        .any(|(t, okk)| *okk && vf::test_matches(t, &cx.test.name));
     bodies.sort();
     bodies.dedup();
     vf::attest_as_runner(
@@ -4056,7 +4648,11 @@ fn hook_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
     let dos: Vec<String> = args
         .get("do")
         .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let toggle = args.get("enable").and_then(Json::as_bool);
     if name.is_none() || (on.is_none() && toggle.is_none()) {
@@ -4081,7 +4677,13 @@ fn hook_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             h.prev = Some(oid);
             h.enabled = enabled;
             let new_oid = repo.store().put(&h)?;
-            (h, vec![Effect::Put { id: new_oid }, point_effect(&repo.log, id, new_oid)?])
+            (
+                h,
+                vec![
+                    Effect::Put { id: new_oid },
+                    point_effect(&repo.log, id, new_oid)?,
+                ],
+            )
         }
         (Some(_), None) => return Err(Error::verb("NOT_FOUND", format!("no hook named {name}"))),
         (None, existing) => {
@@ -4150,13 +4752,20 @@ fn grant_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome
         let list = |key: &str| -> Vec<String> {
             args.get(key)
                 .and_then(Json::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let t = crate::principals::GrantTemplate {
             verbs: list("verbs"),
             paths: list("paths"),
-            delegable: args.get("delegable").and_then(Json::as_bool).unwrap_or(false),
+            delegable: args
+                .get("delegable")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
             ops: args.get("ops").and_then(Json::as_u64),
         };
         let agent_id = repo.agent_id(agent)?;
@@ -4177,8 +4786,12 @@ fn grant_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome
             &[],
         );
     }
-    let name = arg_str(args, "external")
-        .ok_or_else(|| Error::verb("ARGS", "grant needs --external <name>, --human <name>, or --to <agent>"))?;
+    let name = arg_str(args, "external").ok_or_else(|| {
+        Error::verb(
+            "ARGS",
+            "grant needs --external <name>, --human <name>, or --to <agent>",
+        )
+    })?;
     let (id, cap) = repo.grant_external(name)?;
     ok(
         json!({
@@ -4290,7 +4903,13 @@ fn record_conflict(
     }
     let hooks = crate::hooks::fire(
         repo,
-        &crate::hooks::Event::new(repo, "conflict.opened", conflicted_id, &conflicted, json!({ "conflicts": conflicts }))?,
+        &crate::hooks::Event::new(
+            repo,
+            "conflict.opened",
+            conflicted_id,
+            &conflicted,
+            json!({ "conflicts": conflicts }),
+        )?,
     )?;
     ok(
         json!({
@@ -4322,7 +4941,10 @@ fn export(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         return ok(out, &["import --branch <branch>"]);
     }
     if !matches!(format, "agents-md" | "claude-md") {
-        return Err(Error::verb("ARGS", "export format: agents-md, claude-md, or git"));
+        return Err(Error::verb(
+            "ARGS",
+            "export format: agents-md, claude-md, or git",
+        ));
     }
     let ws = require_workspace(repo, actor)?;
     let default_name = if format == "claude-md" {
@@ -4558,17 +5180,43 @@ mod tests {
     fn snapshot_then_verify_runs_the_verifiers() {
         let (_dir, mut repo, mut actor) = scratch();
         // A verifier that passes wherever the tests can run at all.
-        let out = call(&mut repo, &mut actor, "config", &json!({ "set": ["verifiers.tests.pass=cargo --version"] }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "config",
+            &json!({ "set": ["verifiers.tests.pass=cargo --version"] }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
-        let out = call(&mut repo, &mut actor, "standard", &json!({ "require": ["attest(tests.pass)"] }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "standard",
+            &json!({ "require": ["attest(tests.pass)"] }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
-        let out = call(&mut repo, &mut actor, "edit", &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 {\n    1\n}\n" }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 {\n    1\n}\n" }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
-        let out = call(&mut repo, &mut actor, "snapshot", &json!({ "title": "one", "then": "verify" }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "one", "then": "verify" }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
         // The follow-on ran the verifier and attested, rather than only reading the standard.
-        let ran = out["result"]["verify"]["ran"].as_array().expect("then verify runs the verifiers");
-        assert!(ran.iter().any(|r| r["kind"] == json!("tests.pass") && r["result"] == json!(true)), "{out}");
+        let ran = out["result"]["verify"]["ran"]
+            .as_array()
+            .expect("then verify runs the verifiers");
+        assert!(
+            ran.iter()
+                .any(|r| r["kind"] == json!("tests.pass") && r["result"] == json!(true)),
+            "{out}"
+        );
         assert_eq!(out["result"]["verify"]["met"], json!(2), "{out}");
         assert_eq!(out["next"], json!(["promote --to proposed"]), "{out}");
     }
@@ -4578,31 +5226,89 @@ mod tests {
         let (_dir, mut repo, mut actor) = scratch();
         let mut src = String::new();
         for i in 0..30 {
-            src.push_str(&format!("pub fn f{i}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n"));
+            src.push_str(&format!(
+                "pub fn f{i}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n"
+            ));
         }
-        let out = call(&mut repo, &mut actor, "edit", &json!({ "path": "src/lib.rs", "content": src }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": src }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
-        let out = call(&mut repo, &mut actor, "snapshot", &json!({ "title": "thirty functions" }));
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "thirty functions" }),
+        );
         assert_eq!(out["ok"], json!(true), "{out}");
         // Whatever the budget, the response fits in it and the units survive.
         for budget in [150u64, 400, 1000, 4000] {
-            let out = call(&mut repo, &mut actor, "context", &json!({ "path": "src/lib.rs", "budget": budget }));
+            let out = call(
+                &mut repo,
+                &mut actor,
+                "context",
+                &json!({ "path": "src/lib.rs", "budget": budget }),
+            );
             assert_eq!(out["ok"], json!(true), "{out}");
             let used = out["budget"]["used"].as_u64().unwrap();
             assert!(used <= budget, "budget {budget}: used {used}\n{out}");
-            assert!(!out["result"]["units"].as_array().unwrap().is_empty(), "budget {budget}: no units\n{out}");
+            assert!(
+                !out["result"]["units"].as_array().unwrap().is_empty(),
+                "budget {budget}: no units\n{out}"
+            );
         }
-        let small = call(&mut repo, &mut actor, "context", &json!({ "path": "src/lib.rs", "budget": 150 }));
+        let small = call(
+            &mut repo,
+            &mut actor,
+            "context",
+            &json!({ "path": "src/lib.rs", "budget": 150 }),
+        );
         assert_eq!(small["result"]["truncated"], json!(true), "{small}");
-        assert_eq!(small["result"]["files"][0]["truncated"], json!(true), "{small}");
-        assert!(small["result"]["omitted"]["units"].as_u64().unwrap() > 0, "{small}");
-        assert!(small["next"][0].as_str().unwrap().starts_with("context --path src/lib.rs --budget 300"), "{small}");
-        let large = call(&mut repo, &mut actor, "context", &json!({ "path": "src/lib.rs", "budget": 4000 }));
+        assert_eq!(
+            small["result"]["files"][0]["truncated"],
+            json!(true),
+            "{small}"
+        );
+        assert!(
+            small["result"]["omitted"]["units"].as_u64().unwrap() > 0,
+            "{small}"
+        );
+        assert!(
+            small["next"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("context --path src/lib.rs --budget 300"),
+            "{small}"
+        );
+        let large = call(
+            &mut repo,
+            &mut actor,
+            "context",
+            &json!({ "path": "src/lib.rs", "budget": 4000 }),
+        );
         assert_eq!(large["result"]["truncated"], json!(false), "{large}");
-        assert_eq!(large["result"]["files"][0]["truncated"], json!(false), "{large}");
-        assert_eq!(large["result"]["files"][0]["content"], json!(src), "{large}");
-        assert_eq!(large["result"]["units"].as_array().unwrap().len(), 30, "{large}");
-        assert_eq!(large["result"]["omitted"], json!({ "units": 0, "memories": 0, "claims": 0 }));
+        assert_eq!(
+            large["result"]["files"][0]["truncated"],
+            json!(false),
+            "{large}"
+        );
+        assert_eq!(
+            large["result"]["files"][0]["content"],
+            json!(src),
+            "{large}"
+        );
+        assert_eq!(
+            large["result"]["units"].as_array().unwrap().len(),
+            30,
+            "{large}"
+        );
+        assert_eq!(
+            large["result"]["omitted"],
+            json!({ "units": 0, "memories": 0, "claims": 0 })
+        );
     }
 
     #[test]
@@ -4612,28 +5318,59 @@ mod tests {
         bytes.extend(std::iter::repeat_n(b'z', 2000));
         let id = repo.store().put_blob(&bytes).unwrap();
         let hex = id.to_hex();
-        let first = call(&mut repo, &mut actor, "query", &json!({ "kind": "object", "id": hex, "budget": 500 }));
+        let first = call(
+            &mut repo,
+            &mut actor,
+            "query",
+            &json!({ "kind": "object", "id": hex, "budget": 500 }),
+        );
         assert_eq!(first["ok"], json!(true), "{first}");
         assert!(first["budget"]["used"].as_u64().unwrap() <= 500, "{first}");
         let obj = &first["result"]["object"];
         assert_eq!(obj["size"], json!(8000));
         assert_eq!(obj["offset"], json!(0));
         let text = obj["text"].as_str().unwrap();
-        assert!(text.len() < 2000 && text.bytes().all(|b| b == b'a'), "{first}");
+        assert!(
+            text.len() < 2000 && text.bytes().all(|b| b == b'a'),
+            "{first}"
+        );
         let next = obj["next_offset"].as_u64().unwrap() as usize;
         assert_eq!(next, text.len());
-        assert!(first["next"][0].as_str().unwrap().contains(&format!("--offset {next}")), "{first}");
+        assert!(
+            first["next"][0]
+                .as_str()
+                .unwrap()
+                .contains(&format!("--offset {next}")),
+            "{first}"
+        );
         // The tail is where a runner's summary is.
-        let tail = call(&mut repo, &mut actor, "query", &json!({ "kind": "object", "id": hex, "budget": 500, "tail": true }));
+        let tail = call(
+            &mut repo,
+            &mut actor,
+            "query",
+            &json!({ "kind": "object", "id": hex, "budget": 500, "tail": true }),
+        );
         let obj = &tail["result"]["object"];
         let text = obj["text"].as_str().unwrap();
-        assert!(text.len() > 100 && text.bytes().all(|b| b == b'z'), "{tail}");
+        assert!(
+            text.len() > 100 && text.bytes().all(|b| b == b'z'),
+            "{tail}"
+        );
         assert_eq!(obj["offset"].as_u64().unwrap() as usize + text.len(), 8000);
         assert!(obj.get("next_offset").is_none(), "{tail}");
         assert!(tail["next"].as_array().unwrap().is_empty());
         // An offset reads from there, and the last page has no next.
-        let page = call(&mut repo, &mut actor, "query", &json!({ "kind": "object", "id": hex, "budget": 500, "offset": 7990 }));
-        assert_eq!(page["result"]["object"]["text"], json!("zzzzzzzzzz"), "{page}");
+        let page = call(
+            &mut repo,
+            &mut actor,
+            "query",
+            &json!({ "kind": "object", "id": hex, "budget": 500, "offset": 7990 }),
+        );
+        assert_eq!(
+            page["result"]["object"]["text"],
+            json!("zzzzzzzzzz"),
+            "{page}"
+        );
         assert!(page["result"]["object"].get("next_offset").is_none());
     }
 
@@ -4643,10 +5380,16 @@ mod tests {
         for room in [0usize, 1, 2, 3, 8, 20, 40, 200] {
             let take = fit_prefix(text, room);
             assert!(text.is_char_boundary(take));
-            assert!(json_len(&json!(&text[..take])) <= room.max(2) || take == 0, "room {room} take {take}");
+            assert!(
+                json_len(&json!(&text[..take])) <= room.max(2) || take == 0,
+                "room {room} take {take}"
+            );
             let start = fit_suffix(text, room);
             assert!(text.is_char_boundary(start));
-            assert!(json_len(&json!(&text[start..])) <= room.max(2) || start == text.len(), "room {room} start {start}");
+            assert!(
+                json_len(&json!(&text[start..])) <= room.max(2) || start == text.len(),
+                "room {room} start {start}"
+            );
         }
         assert_eq!(fit_prefix(text, 200), text.len());
         assert_eq!(fit_suffix(text, 200), 0);

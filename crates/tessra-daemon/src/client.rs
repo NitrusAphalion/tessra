@@ -44,7 +44,12 @@ pub fn alive(endpoint: &Endpoint) -> bool {
 }
 
 /// Find a live daemon for the repository, starting one if allowed.
-pub fn ensure(tessra_dir: &Path, exe: &Path, repo_root: &Path, may_start: bool) -> Option<Endpoint> {
+pub fn ensure(
+    tessra_dir: &Path,
+    exe: &Path,
+    repo_root: &Path,
+    may_start: bool,
+) -> Option<Endpoint> {
     if let Some(e) = Endpoint::read(tessra_dir) {
         if alive(&e) {
             return Some(e);

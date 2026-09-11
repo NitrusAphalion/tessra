@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use ciborium::value::Value as Cbor;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as Json};
 use tessra_core::cbor;
 use tessra_core::object::{
     Capability, Claim, Effect, Intent, Memory, MemoryScope, Node, NodeIndex, Principal, Revision,
@@ -20,8 +22,6 @@ use tessra_oplog::build::{self, point_effect};
 use tessra_oplog::glob;
 use tessra_oplog::verify::landed_revisions;
 use tessra_oplog::view::{Pointer, ViewState};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as Json};
 
 use crate::principals::Actor;
 use crate::tree;
@@ -77,7 +77,16 @@ pub struct Group {
     pub dependents: usize,
 }
 
-const NOT_UNITS: &[&str] = &["import", "chunk", "test", "test.skipped", "module", "variant", "field", "impl"];
+const NOT_UNITS: &[&str] = &[
+    "import",
+    "chunk",
+    "test",
+    "test.skipped",
+    "module",
+    "variant",
+    "field",
+    "impl",
+];
 
 /// Partition the units under `paths` into at most `agents` groups.
 /// Units joined by a dependency edge, in either direction, stay together;
@@ -90,7 +99,11 @@ pub fn partition(idx: &NodeIndex, paths: &[String], agents: usize) -> Vec<Group>
         .filter(|n| !NOT_UNITS.contains(&n.kind.as_str()))
         .filter(|n| tessra_semantic::rename::is_ident(&n.name))
         .collect();
-    let index_of: HashMap<EntityId, usize> = candidates.iter().enumerate().map(|(i, n)| (n.nid, i)).collect();
+    let index_of: HashMap<EntityId, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.nid, i))
+        .collect();
     // Union-find over dependency edges within the candidate set.
     let mut parent: Vec<usize> = (0..candidates.len()).collect();
     fn find(p: &mut [usize], i: usize) -> usize {
@@ -122,9 +135,14 @@ pub fn partition(idx: &NodeIndex, paths: &[String], agents: usize) -> Vec<Group>
         components.entry(r).or_default().push(i);
     }
     let mut comps: Vec<Vec<usize>> = components.into_values().collect();
-    comps.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| {
-        candidates[a[0]].path.cmp(&candidates[b[0]].path).then(candidates[a[0]].name.cmp(&candidates[b[0]].name))
-    }));
+    comps.sort_by(|a, b| {
+        b.len().cmp(&a.len()).then_with(|| {
+            candidates[a[0]]
+                .path
+                .cmp(&candidates[b[0]].path)
+                .then(candidates[a[0]].name.cmp(&candidates[b[0]].name))
+        })
+    });
     // Greedy balance into at most `agents` buckets, largest components first.
     let buckets = agents.max(1).min(comps.len().max(1));
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); buckets];
@@ -144,7 +162,13 @@ pub fn partition(idx: &NodeIndex, paths: &[String], agents: usize) -> Vec<Group>
         .map(|g| {
             let mut units: Vec<(String, String, EntityId)> = g
                 .iter()
-                .map(|&i| (candidates[i].path.clone(), candidates[i].name.clone(), candidates[i].nid))
+                .map(|&i| {
+                    (
+                        candidates[i].path.clone(),
+                        candidates[i].name.clone(),
+                        candidates[i].nid,
+                    )
+                })
                 .collect();
             units.sort();
             let nids: HashSet<EntityId> = units.iter().map(|u| u.2).collect();
@@ -157,7 +181,11 @@ pub fn partition(idx: &NodeIndex, paths: &[String], agents: usize) -> Vec<Group>
                 .filter(|n| !nids.contains(&n.nid) && n.kind != "test")
                 .filter(|n| n.deps.iter().flatten().any(|d| nids.contains(d)))
                 .count();
-            Group { units, paths, dependents }
+            Group {
+                units,
+                paths,
+                dependents,
+            }
         })
         .collect()
 }
@@ -182,14 +210,21 @@ pub fn plan(
     let (_, idx) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
     let groups = partition(&idx, paths, agents.len());
     if groups.is_empty() {
-        return Err(Error::verb("PLAN", "no units under those paths to partition"));
+        return Err(Error::verb(
+            "PLAN",
+            "no units under those paths to partition",
+        ));
     }
     let t = now();
     let parent = Intent {
         id: EntityId::random(),
         prev: None,
         title: title.into(),
-        body: Some(format!("{} sub-intents over {} paths", groups.len(), paths.join(", "))),
+        body: Some(format!(
+            "{} sub-intents over {} paths",
+            groups.len(),
+            paths.join(", ")
+        )),
         spec: None,
         evals: None,
         parent: None,
@@ -219,7 +254,14 @@ pub fn plan(
         let sub = Intent {
             id: EntityId::random(),
             prev: None,
-            title: format!("{title}: {}", g.units.iter().map(|u| u.1.as_str()).collect::<Vec<_>>().join(", ")),
+            title: format!(
+                "{title}: {}",
+                g.units
+                    .iter()
+                    .map(|u| u.1.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             body: Some(format!("units {}", unit_names.join(", "))),
             spec: None,
             evals: None,
@@ -296,7 +338,9 @@ pub fn plan(
     // contained in the planner's own, with the group's paths and budget.
     let mut delegated: Vec<Json> = Vec::new();
     let parent_cap: Option<(ObjectId, Capability)> = match actor.cap {
-        Some(id) if actor.kind == "session" => repo.store().get::<Capability>(&id).ok().map(|c| (id, c)),
+        Some(id) if actor.kind == "session" => {
+            repo.store().get::<Capability>(&id).ok().map(|c| (id, c))
+        }
         _ => None,
     };
     if let Some((parent_id, parent)) = parent_cap.filter(|(_, c)| c.delegable) {
@@ -304,7 +348,11 @@ pub fn plan(
             let agent_name = &agents[i];
             let session = repo.open_session(agent_name, None, a.paths.clone())?;
             let mut hard = parent.hard.clone().unwrap_or_default();
-            let parent_ops = parent.hard.as_ref().and_then(|h| h.get("ops").copied()).unwrap_or(u64::MAX);
+            let parent_ops = parent
+                .hard
+                .as_ref()
+                .and_then(|h| h.get("ops").copied())
+                .unwrap_or(u64::MAX);
             hard.insert("ops".to_string(), a.ops.min(parent_ops).max(1));
             let mut child = Capability {
                 issuer: actor.principal(),
@@ -370,7 +418,9 @@ pub fn overlapping_claims(repo: &Repo, mine: EntityId, paths: &[String]) -> Resu
     let t = tessra_core::trie::Trie::new(repo.store());
     let mut out = Vec::new();
     for (_, v) in t.entries(&view.claims)? {
-        let Some(Pointer::Id(oid)) = Pointer::from_trie(&v) else { continue };
+        let Some(Pointer::Id(oid)) = Pointer::from_trie(&v) else {
+            continue;
+        };
         let c: Claim = repo.store().get(&oid)?;
         if c.principal == mine || c.expires <= now() {
             continue;
@@ -385,10 +435,19 @@ pub fn overlapping_claims(repo: &Repo, mine: EntityId, paths: &[String]) -> Resu
             .collect();
         let hit: Vec<&String> = paths
             .iter()
-            .filter(|p| theirs.iter().any(|q| glob::contained(p, q) || glob::contained(q, p) || glob::matches(q, p) || glob::matches(p, q)))
+            .filter(|p| {
+                theirs.iter().any(|q| {
+                    glob::contained(p, q)
+                        || glob::contained(q, p)
+                        || glob::matches(q, p)
+                        || glob::matches(p, q)
+                })
+            })
             .collect();
         if !hit.is_empty() {
-            let who = repo.principal_name(&c.principal).unwrap_or_else(|| c.principal.to_letters());
+            let who = repo
+                .principal_name(&c.principal)
+                .unwrap_or_else(|| c.principal.to_letters());
             out.push(json!({
                 "principal": c.principal.to_letters(),
                 "who": who,
@@ -410,7 +469,11 @@ pub fn overlapping_claims(repo: &Repo, mine: EntityId, paths: &[String]) -> Resu
 /// parents [R], snapshots re-merged, authored by the daemon. Only clean
 /// workspaces are rewritten; a dirty one keeps its files and lands later
 /// through the three-way merge, whose base is still correct.
-pub fn restack_children(repo: &mut Repo, rev_id: ObjectId, landing_id: ObjectId) -> Result<Vec<Json>> {
+pub fn restack_children(
+    repo: &mut Repo,
+    rev_id: ObjectId,
+    landing_id: ObjectId,
+) -> Result<Vec<Json>> {
     let view = repo.log.current_view()?;
     let landed = landed_revisions(repo.store(), &view)?;
     let workspaces: Vec<Workspace> = repo.workspaces.clone();
@@ -465,7 +528,17 @@ pub fn restack_children(repo: &mut Repo, rev_id: ObjectId, landing_id: ObjectId)
         let (_, b_idx) = crate::semantic::index_for_snapshot(repo.store(), &x_snap_id)?;
         let ops_a = crate::semantic::recorded_renames(landing.ops.as_deref().unwrap_or(&[]));
         let ops_b = crate::semantic::recorded_renames(x.ops.as_deref().unwrap_or(&[]));
-        let tm = crate::semantic::merge_trees(repo.store(), &base_flat, &a, &b, Some(&base_idx), &a_idx, &b_idx, &ops_a, &ops_b)?;
+        let tm = crate::semantic::merge_trees(
+            repo.store(),
+            &base_flat,
+            &a,
+            &b,
+            Some(&base_idx),
+            &a_idx,
+            &b_idx,
+            &ops_a,
+            &ops_b,
+        )?;
         if !tm.conflicts.is_empty() {
             out.push(json!({ "change": x.id.to_letters(), "restacked": false, "why": format!("conflicts: {}", tm.conflicts.join(", ")) }));
             continue;
@@ -473,7 +546,13 @@ pub fn restack_children(repo: &mut Repo, rev_id: ObjectId, landing_id: ObjectId)
         let root = tree::build(repo.store(), &tm.flat)?;
         let mut nodes = crate::semantic::build_nodes(repo.store(), &tm.flat, Some((&a, &a_idx)))?;
         let aliases = crate::semantic::reconcile_aliases(&mut nodes, Some(&base_idx), &b_idx);
-        let idx = crate::semantic::put_index_with_aliases(repo.store(), root, vec![a_idx_id], nodes, Some(aliases))?;
+        let idx = crate::semantic::put_index_with_aliases(
+            repo.store(),
+            root,
+            vec![a_idx_id],
+            nodes,
+            Some(aliases),
+        )?;
         let snap = repo.store().put(&Snapshot {
             root,
             rules: x_snap.rules,
@@ -494,7 +573,10 @@ pub fn restack_children(repo: &mut Repo, rev_id: ObjectId, landing_id: ObjectId)
             flags: x.flags.clone(),
         };
         let new_id = repo.store().put(&restacked)?;
-        let mut effects = vec![Effect::Put { id: new_id }, point_effect(&repo.log, x.id, new_id)?];
+        let mut effects = vec![
+            Effect::Put { id: new_id },
+            point_effect(&repo.log, x.id, new_id)?,
+        ];
         if was_proposed {
             effects.push(Effect::Unpropose { rev: x_id });
             effects.push(Effect::Propose { rev: new_id });
@@ -537,7 +619,9 @@ pub fn revoke_agent(repo: &mut Repo, actor: &Actor, agent: EntityId) -> Result<J
     let mut memories: Vec<(EntityId, ObjectId, Memory)> = Vec::new();
     for (id, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Some(bytes) = repo.store().get_bytes(&oid)? else { continue };
+        let Some(bytes) = repo.store().get_bytes(&oid)? else {
+            continue;
+        };
         match cbor::peek_tag(&bytes).ok().as_deref() {
             Some("principal") => {
                 if let Ok(p) = cbor::decode::<Principal>(&bytes) {
@@ -554,7 +638,11 @@ pub fn revoke_agent(repo: &mut Repo, actor: &Actor, agent: EntityId) -> Result<J
             _ => {}
         }
     }
-    let mine: HashSet<EntityId> = sessions.iter().copied().chain(std::iter::once(agent)).collect();
+    let mine: HashSet<EntityId> = sessions
+        .iter()
+        .copied()
+        .chain(std::iter::once(agent))
+        .collect();
     let mut effects = vec![Effect::Revoke { principal: agent }];
     for s in &sessions {
         effects.push(Effect::Revoke { principal: *s });
@@ -588,7 +676,10 @@ pub fn revoke_agent(repo: &mut Repo, actor: &Actor, agent: EntityId) -> Result<J
     let t = tessra_core::trie::Trie::new(repo.store());
     let mut claims: Vec<String> = Vec::new();
     for (k, v) in t.entries(&view.claims)? {
-        let (Ok(id), Some(Pointer::Id(oid))) = (EntityId::from_slice(&k), Pointer::from_trie(&v)) else { continue };
+        let (Ok(id), Some(Pointer::Id(oid))) = (EntityId::from_slice(&k), Pointer::from_trie(&v))
+        else {
+            continue;
+        };
         let c: Claim = repo.store().get(&oid)?;
         if mine.contains(&c.principal) {
             effects.push(Effect::Unclaim { claim: id });

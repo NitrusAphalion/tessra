@@ -336,7 +336,9 @@ impl<'a> Ctx<'a> {
             self.changed_units()?
                 .into_iter()
                 .filter(|n| {
-                    is_test_kind(&n.kind) && !prev.contains(&n.nid) && !prev_bodies.contains(&n.body)
+                    is_test_kind(&n.kind)
+                        && !prev.contains(&n.nid)
+                        && !prev_bodies.contains(&n.body)
                 })
                 .collect(),
         )
@@ -352,7 +354,12 @@ impl<'a> Ctx<'a> {
     }
 
     /// The units among `units` that no true attestation of `kind` names in `bodies`.
-    fn uncovered_by_bodies(&self, kind: &str, units: &[&'a Node], allow_self: bool) -> Vec<&'a Node> {
+    fn uncovered_by_bodies(
+        &self,
+        kind: &str,
+        units: &[&'a Node],
+        allow_self: bool,
+    ) -> Vec<&'a Node> {
         let mut covered: HashSet<ObjectId> = HashSet::new();
         for l in self.attests {
             if l.att.kind == kind && truthy(&l.att.result) && self.trusted(l, allow_self) {
@@ -398,8 +405,14 @@ impl<'a> Ctx<'a> {
             }
         }
         let (_, att) = best?;
-        let Value::Map(m) = &att.result else { return None };
-        let get = |k: &str| m.iter().find(|(key, _)| matches!(key, Value::Text(t) if t == k)).map(|(_, v)| v);
+        let Value::Map(m) = &att.result else {
+            return None;
+        };
+        let get = |k: &str| {
+            m.iter()
+                .find(|(key, _)| matches!(key, Value::Text(t) if t == k))
+                .map(|(_, v)| v)
+        };
         let score = match get("score") {
             Some(Value::Integer(i)) => i128::from(*i) as u32,
             _ => return None,
@@ -526,11 +539,7 @@ fn forbidden_reason(ctx: &Ctx<'_>, p: &Predicate) -> String {
     if p.kind == "structural" {
         if let Some(units) = structural_units(ctx, p.name.as_deref().unwrap_or("")) {
             if !units.is_empty() {
-                return format!(
-                    "{}: {}",
-                    p.name.as_deref().unwrap_or(""),
-                    names(&units)
-                );
+                return format!("{}: {}", p.name.as_deref().unwrap_or(""), names(&units));
             }
         }
     }
@@ -646,10 +655,7 @@ pub fn parse_predicate(text: &str) -> std::result::Result<Predicate, String> {
         return Ok(Predicate {
             kind,
             name: None,
-            args: Some(BTreeMap::from([(
-                "preds".to_string(),
-                Value::Array(arr),
-            )])),
+            args: Some(BTreeMap::from([("preds".to_string(), Value::Array(arr))])),
         });
     }
     let mut name = None;
@@ -916,10 +922,7 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
         }
         "all" | "any" | "not" => {
             let preds = sub_preds(p);
-            let results: Vec<Holds> = preds
-                .iter()
-                .map(|q| holds(ctx, q))
-                .collect::<Result<_>>()?;
+            let results: Vec<Holds> = preds.iter().map(|q| holds(ctx, q)).collect::<Result<_>>()?;
             match p.kind.as_str() {
                 "all" => results
                     .into_iter()
@@ -950,7 +953,9 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
                 .and_then(|a| a.get("keysigned"))
                 .is_some_and(|v| matches!(v, Value::Bool(true)));
             if by != "human" {
-                return Ok(Holds::No(format!("approved by {by} is not available yet; by=human is")));
+                return Ok(Holds::No(format!(
+                    "approved by {by} is not available yet; by=human is"
+                )));
             }
             let found = ctx.attests.iter().any(|l| {
                 l.att.kind == "approval.human"
@@ -964,7 +969,11 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
             });
             if found {
                 Holds::Yes
-            } else if ctx.attests.iter().any(|l| l.att.kind == "approval.human" && !truthy(&l.att.result)) {
+            } else if ctx
+                .attests
+                .iter()
+                .any(|l| l.att.kind == "approval.human" && !truthy(&l.att.result))
+            {
                 Holds::No("a human declined this change".into())
             } else {
                 Holds::No("needs a human's approval through a channel".into())
@@ -1005,7 +1014,13 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
                 }
                 let name = l.signer_name.clone().unwrap_or_else(|| "a judge".into());
                 let (conf, reasoning) = judge_result(&l.att.result);
-                let who = format!("{name}{}", l.signer_model.as_ref().map(|m| format!(" ({m})")).unwrap_or_default());
+                let who = format!(
+                    "{name}{}",
+                    l.signer_model
+                        .as_ref()
+                        .map(|m| format!(" ({m})"))
+                        .unwrap_or_default()
+                );
                 if conf < min_conf {
                     low.push(format!("{who}: confidence {conf}"));
                 } else if truthy(&l.att.result) {
@@ -1022,10 +1037,19 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
             } else if yes.len() < needed {
                 let mut why = format!("needs {needed} judges on {rubric}, has {}", yes.len());
                 if !yes.is_empty() {
-                    why.push_str(&format!(" ({})", yes.iter().map(|(_, _, w)| w.as_str()).collect::<Vec<_>>().join(", ")));
+                    why.push_str(&format!(
+                        " ({})",
+                        yes.iter()
+                            .map(|(_, _, w)| w.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if !low.is_empty() {
-                    why.push_str(&format!("; below min_confidence {min_conf}: {}", low.join(", ")));
+                    why.push_str(&format!(
+                        "; below min_confidence {min_conf}: {}",
+                        low.join(", ")
+                    ));
                 }
                 if own > 0 {
                     why.push_str(&format!("; {own} from the author's own agent do not count"));
@@ -1036,7 +1060,13 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
                 models.sort();
                 models.dedup();
                 if models.len() < needed.min(yes.len()) {
-                    Holds::No(format!("judges on {rubric} must use distinct models; got {}", yes.iter().map(|(_, m, _)| m.clone().unwrap_or_else(|| "unknown".into())).collect::<Vec<_>>().join(", ")))
+                    Holds::No(format!(
+                        "judges on {rubric} must use distinct models; got {}",
+                        yes.iter()
+                            .map(|(_, m, _)| m.clone().unwrap_or_else(|| "unknown".into()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
                 } else {
                     Holds::Yes
                 }
@@ -1050,19 +1080,31 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
             let signal = p.name.as_deref().unwrap_or("");
             let kind = format!("observe.{signal}");
             let bound = |k: &str| -> Option<i64> {
-                p.args.as_ref().and_then(|a| a.get(k)).and_then(|v| match v {
-                    Value::Integer(i) => Some(i128::from(*i) as i64),
-                    Value::Text(t) => t.parse().ok(),
-                    _ => None,
-                })
+                p.args
+                    .as_ref()
+                    .and_then(|a| a.get(k))
+                    .and_then(|v| match v {
+                        Value::Integer(i) => Some(i128::from(*i) as i64),
+                        Value::Text(t) => t.parse().ok(),
+                        _ => None,
+                    })
             };
             let latest = ctx
                 .attests
                 .iter()
-                .filter(|l| l.att.kind == kind && l.att.subject.as_ref().is_some_and(|s| self_subjects(&ctx.subjects, s)) && self_trusted(ctx, l))
+                .filter(|l| {
+                    l.att.kind == kind
+                        && l.att
+                            .subject
+                            .as_ref()
+                            .is_some_and(|s| self_subjects(&ctx.subjects, s))
+                        && self_trusted(ctx, l)
+                })
                 .max_by_key(|l| l.att.time);
             match latest {
-                None => Holds::No(format!("no observe.{signal} attestation on this revision; observe the target first")),
+                None => Holds::No(format!(
+                    "no observe.{signal} attestation on this revision; observe the target first"
+                )),
                 Some(l) => {
                     let value = match &l.att.result {
                         Value::Integer(i) => i128::from(*i) as i64,
@@ -1070,18 +1112,22 @@ fn holds(ctx: &Ctx<'_>, p: &Predicate) -> Result<Holds> {
                         _ => 0,
                     };
                     if bound("max").is_some_and(|m| value > m) {
-                        Holds::No(format!("{signal} is {value} permille, above {}", bound("max").unwrap_or(0)))
+                        Holds::No(format!(
+                            "{signal} is {value} permille, above {}",
+                            bound("max").unwrap_or(0)
+                        ))
                     } else if bound("min").is_some_and(|m| value < m) {
-                        Holds::No(format!("{signal} is {value} permille, below {}", bound("min").unwrap_or(0)))
+                        Holds::No(format!(
+                            "{signal} is {value} permille, below {}",
+                            bound("min").unwrap_or(0)
+                        ))
                     } else {
                         Holds::Yes
                     }
                 }
             }
         }
-        "reputation" => {
-            Holds::No(format!("{} clauses are evaluated from M5 onward", p.kind))
-        }
+        "reputation" => Holds::No(format!("{} clauses are evaluated from M5 onward", p.kind)),
         other => Holds::No(format!("unknown predicate kind {other}")),
     })
 }
@@ -1099,7 +1145,12 @@ fn self_judges<'a>(ctx: &'a Ctx<'a>, kind: &str) -> Vec<&'a Loaded> {
     ctx.attests
         .iter()
         .filter(|l| l.att.kind == kind)
-        .filter(|l| l.att.subject.as_ref().is_some_and(|s| self_subjects(&ctx.subjects, s)))
+        .filter(|l| {
+            l.att
+                .subject
+                .as_ref()
+                .is_some_and(|s| self_subjects(&ctx.subjects, s))
+        })
         .collect()
 }
 
@@ -1110,8 +1161,12 @@ pub fn judge_result(v: &Value) -> (i64, String) {
     if let Value::Map(m) = v {
         for (k, val) in m {
             match (k, val) {
-                (Value::Text(t), Value::Integer(i)) if t == "confidence" => conf = i128::from(*i) as i64,
-                (Value::Text(t), Value::Float(f)) if t == "confidence" => conf = (*f * 1000.0) as i64,
+                (Value::Text(t), Value::Integer(i)) if t == "confidence" => {
+                    conf = i128::from(*i) as i64
+                }
+                (Value::Text(t), Value::Float(f)) if t == "confidence" => {
+                    conf = (*f * 1000.0) as i64
+                }
                 (Value::Text(t), Value::Text(r)) if t == "reasoning" => reasoning = r.clone(),
                 _ => {}
             }
@@ -1156,13 +1211,25 @@ mod tests {
         };
         let reason = negative_reason("tests.pass", &att);
         assert!(reason.starts_with("tests.pass is false on this snapshot; the runner exited 1 and reported no per-test results"), "{reason}");
-        assert!(reason.contains(&format!("query --kind object --id {} --tail", evidence.to_hex())), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "query --kind object --id {} --tail",
+                evidence.to_hex()
+            )),
+            "{reason}"
+        );
         assert!(reason.ends_with("fix it and run verify"), "{reason}");
-        att.scope.as_mut().unwrap().insert("failed".to_string(), Value::Array(vec![Value::Text("tests::sub_fails".into())]));
+        att.scope.as_mut().unwrap().insert(
+            "failed".to_string(),
+            Value::Array(vec![Value::Text("tests::sub_fails".into())]),
+        );
         att.evidence = None;
         let reason = negative_reason("tests.pass", &att);
         assert!(reason.contains("failed: [tests::sub_fails]"), "{reason}");
-        assert!(!reason.contains("exited") && !reason.contains("query"), "{reason}");
+        assert!(
+            !reason.contains("exited") && !reason.contains("query"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -1182,7 +1249,11 @@ mod tests {
     #[test]
     fn required_attestations_walk_the_chain() {
         let mut s = default_trunk_standard(EntityId::random(), "trunk");
-        for text in ["attest(tests.pass)", "attest(tests.fail_on_parent, for=new_tests)", "any(attest(lint.clean), attest(tests.pass))"] {
+        for text in [
+            "attest(tests.pass)",
+            "attest(tests.fail_on_parent, for=new_tests)",
+            "any(attest(lint.clean), attest(tests.pass))",
+        ] {
             s.clauses.push(Clause {
                 op: "require".into(),
                 pred: parse_predicate(text).unwrap(),
@@ -1194,7 +1265,10 @@ mod tests {
             req,
             vec![
                 ("tests.pass".to_string(), None),
-                ("tests.fail_on_parent".to_string(), Some("new_tests".to_string())),
+                (
+                    "tests.fail_on_parent".to_string(),
+                    Some("new_tests".to_string())
+                ),
                 ("lint.clean".to_string(), None),
             ]
         );

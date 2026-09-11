@@ -236,7 +236,11 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
     };
     if actor.kind == "session" && repo.is_revoked(&actor.principal()) {
         if let Some(name) = &req.agent {
-            let write = if req.write.is_empty() { vec!["**".to_string()] } else { req.write.clone() };
+            let write = if req.write.is_empty() {
+                vec!["**".to_string()]
+            } else {
+                req.write.clone()
+            };
             let key = format!("{name}\u{0}{}", write.join("\u{0}"));
             shared.sessions.lock().unwrap().remove(&key);
         }

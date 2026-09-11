@@ -6,11 +6,11 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as Json};
 use tessra_core::object::Revision;
 use tessra_core::store::ObjectStore;
 use tessra_core::EntityId;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as Json};
 
 use crate::hooks::{self, Event};
 use crate::{now, Error, Repo, Result};
@@ -58,11 +58,19 @@ fn config_u64(repo: &Repo, key: &str, default: u64) -> u64 {
 
 /// Refuse a mutation while the session's agent is throttled.
 pub fn check(repo: &Repo, principal: &EntityId) -> Result<()> {
-    let Some(agent) = repo.session_agent(principal) else { return Ok(()) };
+    let Some(agent) = repo.session_agent(principal) else {
+        return Ok(());
+    };
     let s = load(repo, &agent);
     if s.throttled_until > now() {
         let left = (s.throttled_until - now()) / 1_000_000_000;
-        let last: Vec<&str> = s.events.iter().rev().take(3).map(|(_, e)| e.as_str()).collect();
+        let last: Vec<&str> = s
+            .events
+            .iter()
+            .rev()
+            .take(3)
+            .map(|(_, e)| e.as_str())
+            .collect();
         return Err(Error::verb(
             "THROTTLED",
             format!(
@@ -77,8 +85,15 @@ pub fn check(repo: &Repo, principal: &EntityId) -> Result<()> {
 /// Record an anomaly for the agent behind a principal. Returns what
 /// happened when the principal is a session: the score, and whether it
 /// was throttled or revoked.
-pub fn record(repo: &mut Repo, principal: &EntityId, what: &str, points: u32) -> Result<Option<Json>> {
-    let Some(agent) = repo.session_agent(principal) else { return Ok(None) };
+pub fn record(
+    repo: &mut Repo,
+    principal: &EntityId,
+    what: &str,
+    points: u32,
+) -> Result<Option<Json>> {
+    let Some(agent) = repo.session_agent(principal) else {
+        return Ok(None);
+    };
     let mut s = load(repo, &agent);
     s.score += points;
     s.events.push((now(), what.to_string()));
@@ -88,10 +103,17 @@ pub fn record(repo: &mut Repo, principal: &EntityId, what: &str, points: u32) ->
     let throttle_at = config_u64(repo, "anomaly_throttle", 3) as u32;
     let revoke_at = config_u64(repo, "anomaly_revoke", 6) as u32;
     let cooldown = config_u64(repo, "anomaly_cooldown_s", 60) as i64;
-    let name = repo.principal_name(&agent).unwrap_or_else(|| agent.to_letters());
+    let name = repo
+        .principal_name(&agent)
+        .unwrap_or_else(|| agent.to_letters());
     let mut out = json!({ "agent": name, "what": what, "points": points, "score": s.score });
     let event_of = |repo: &Repo, kind: &str, extra: Json| -> Result<Event> {
-        let (rev_id, rev) = match repo.workspaces.iter().find(|w| w.principal == *principal).and_then(|w| w.current) {
+        let (rev_id, rev) = match repo
+            .workspaces
+            .iter()
+            .find(|w| w.principal == *principal)
+            .and_then(|w| w.current)
+        {
             Some(cur) => (cur, repo.store().get::<Revision>(&cur)?),
             None => {
                 let (head, _) = crate::verbs::trunk_head_of(repo)?;

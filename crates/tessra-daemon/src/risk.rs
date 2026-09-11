@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use ciborium::value::Value as Cbor;
+use serde_bytes::ByteBuf;
+use serde_json::{json, Value as Json};
 use tessra_core::object::{Attestation, Effect, Node, Revision};
 use tessra_core::sig::SignedObject;
 use tessra_core::store::ObjectStore;
@@ -14,8 +16,6 @@ use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
 use tessra_oplog::glob;
 use tessra_oplog::verify::landed_revisions;
-use serde_bytes::ByteBuf;
-use serde_json::{json, Value as Json};
 
 use crate::verifiers;
 use crate::{hooks, now, Repo, Result};
@@ -81,7 +81,11 @@ fn names(units: &[&Node]) -> String {
     v.sort();
     v.dedup();
     let shown: Vec<&str> = v.iter().take(6).copied().collect();
-    let more = if v.len() > 6 { format!(" and {} more", v.len() - 6) } else { String::new() };
+    let more = if v.len() > 6 {
+        format!(" and {} more", v.len() - 6)
+    } else {
+        String::new()
+    };
     format!("{}{more}", shown.join(", "))
 }
 
@@ -125,7 +129,12 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
     let code: Vec<&Node> = changed
         .iter()
         .copied()
-        .filter(|n| !matches!(n.kind.as_str(), "test" | "test.skipped" | "impl" | "module" | "variant" | "field"))
+        .filter(|n| {
+            !matches!(
+                n.kind.as_str(),
+                "test" | "test.skipped" | "impl" | "module" | "variant" | "field"
+            )
+        })
         .collect();
 
     // Size and shape.
@@ -176,12 +185,9 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
         .iter()
         .copied()
         .filter(|n| (n.kind == "test" || n.kind == "test.skipped") && parent_ids.contains(&n.nid))
-        .chain(
-            parent_idx
-                .nodes
-                .iter()
-                .filter(|n| (n.kind == "test" || n.kind == "test.skipped") && !now_ids.contains(&n.nid)),
-        )
+        .chain(parent_idx.nodes.iter().filter(|n| {
+            (n.kind == "test" || n.kind == "test.skipped") && !now_ids.contains(&n.nid)
+        }))
         .collect();
     if !weakened.is_empty() {
         factors.push(Factor {
@@ -202,7 +208,14 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
         factors.push(Factor {
             name: "dependencies".into(),
             points: 15,
-            detail: format!("dependency manifest changed: {}", manifests.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+            detail: format!(
+                "dependency manifest changed: {}",
+                manifests
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             lower: "land dependency changes on their own, with approval".into(),
         });
     }
@@ -221,7 +234,14 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
         factors.push(Factor {
             name: "sensitive_scope".into(),
             points: 25,
-            detail: format!("touches a sensitive scope: {}", sensitive.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+            detail: format!(
+                "touches a sensitive scope: {}",
+                sensitive
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             lower: "get a human approval for this scope, or keep the change out of it".into(),
         });
     }
@@ -255,17 +275,34 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
         if cur == *rev_id || landed.contains(&cur) {
             continue;
         }
-        let Ok(other) = repo.store().get::<Revision>(&cur) else { continue };
+        let Ok(other) = repo.store().get::<Revision>(&cur) else {
+            continue;
+        };
         if other.id == rev.id {
             continue;
         }
-        let Some(os) = other.snapshots.get("") else { continue };
-        let Ok((_, oidx)) = crate::semantic::index_for_snapshot(repo.store(), os) else { continue };
-        let Some(op) = other.parents.first() else { continue };
-        let Ok(opr) = repo.store().get::<Revision>(op) else { continue };
-        let Some(ops) = opr.snapshots.get("") else { continue };
-        let Ok((_, opidx)) = crate::semantic::index_for_snapshot(repo.store(), ops) else { continue };
-        let theirs: HashSet<EntityId> = verifiers::changed_units(&opidx, &oidx).iter().map(|n| n.nid).collect();
+        let Some(os) = other.snapshots.get("") else {
+            continue;
+        };
+        let Ok((_, oidx)) = crate::semantic::index_for_snapshot(repo.store(), os) else {
+            continue;
+        };
+        let Some(op) = other.parents.first() else {
+            continue;
+        };
+        let Ok(opr) = repo.store().get::<Revision>(op) else {
+            continue;
+        };
+        let Some(ops) = opr.snapshots.get("") else {
+            continue;
+        };
+        let Ok((_, opidx)) = crate::semantic::index_for_snapshot(repo.store(), ops) else {
+            continue;
+        };
+        let theirs: HashSet<EntityId> = verifiers::changed_units(&opidx, &oidx)
+            .iter()
+            .map(|n| n.nid)
+            .collect();
         if theirs.iter().any(|n| changed_ids.contains(n)) {
             colliding.push(other.author.to_letters());
         }
@@ -276,7 +313,10 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
         factors.push(Factor {
             name: "collision".into(),
             points: 10,
-            detail: format!("other unlanded work changes the same units, by {}", colliding.join(", ")),
+            detail: format!(
+                "other unlanded work changes the same units, by {}",
+                colliding.join(", ")
+            ),
             lower: "land or coordinate with the other change first".into(),
         });
     }
@@ -323,8 +363,15 @@ fn to_cbor(r: &Risk) -> Cbor {
 
 /// The risk attestation on a revision: the one already recorded, or a new
 /// one signed by the daemon. Returns the attestation ID and the risk.
-pub fn ensure_attested(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision) -> Result<(ObjectId, Risk)> {
-    if let Some((id, a)) = verifiers::on_subject(repo.store(), "risk.change", rev_id.as_bytes())?.into_iter().next() {
+pub fn ensure_attested(
+    repo: &mut Repo,
+    rev_id: &ObjectId,
+    rev: &Revision,
+) -> Result<(ObjectId, Risk)> {
+    if let Some((id, a)) = verifiers::on_subject(repo.store(), "risk.change", rev_id.as_bytes())?
+        .into_iter()
+        .next()
+    {
         if let Some(r) = from_cbor(&a.result) {
             return Ok((id, r));
         }
@@ -367,7 +414,11 @@ pub fn ensure_attested(repo: &mut Repo, rev_id: &ObjectId, rev: &Revision) -> Re
 /// Read a risk back from an attestation's result.
 pub fn from_cbor(v: &Cbor) -> Option<Risk> {
     let Cbor::Map(m) = v else { return None };
-    let get = |k: &str| m.iter().find(|(key, _)| matches!(key, Cbor::Text(t) if t == k)).map(|(_, v)| v);
+    let get = |k: &str| {
+        m.iter()
+            .find(|(key, _)| matches!(key, Cbor::Text(t) if t == k))
+            .map(|(_, v)| v)
+    };
     let score = match get("score") {
         Some(Cbor::Integer(i)) => i128::from(*i) as u32,
         _ => return None,

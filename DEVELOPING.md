@@ -122,16 +122,17 @@ tessra init                                       # once per clone; imports the 
 tessra status --pretty
 ```
 
-The store and the standard are per machine, so a fresh clone sets them up once. This is the standard the repository is developed under; `verify` runs both verifiers in a scratch copy and lands nothing until both attest:
+The store and the standard are per machine, so a fresh clone sets them up once. This is the standard the repository is developed under; `verify` runs the three verifiers in a scratch copy and lands nothing until all of them attest:
 
 ```sh
 tessra config --set 'verifiers.tests.pass=cargo test --workspace'
 tessra config --set 'verifiers.lint.clean=cargo clippy --workspace --all-targets -- -D warnings'
-tessra standard --require 'attest(tests.pass)' --require 'attest(lint.clean)'
+tessra config --set 'verifiers.fmt.clean=cargo fmt --all --check'
+tessra standard --require 'attest(tests.pass)' --require 'attest(lint.clean)' --require 'attest(fmt.clean)'
 tessra standard --forbid 'structural(test.weakened) unless approved(human)'
 ```
 
-The trunk standard therefore requires `attest(tests.pass)` and `attest(lint.clean)`, so clippy warnings block a landing the way a failing test does, and forbids `structural(test.weakened)` unless a human approves. `test.weakened` means any existing test that was modified or deleted, so a change that touches a test needs the owner's approval attested on its revision before it lands:
+The trunk standard therefore requires `attest(tests.pass)`, `attest(lint.clean)`, and `attest(fmt.clean)`, so a clippy warning or an unformatted file blocks a landing the way a failing test does, and forbids `structural(test.weakened)` unless a human approves. Run `cargo fmt --all` before you snapshot. `test.weakened` means any existing test that was modified or deleted, so a change that touches a test needs the owner's approval attested on its revision before it lands:
 
 ```sh
 tessra --as malon attest --kind approval.human --subject <revision> --result true

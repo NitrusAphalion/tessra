@@ -25,8 +25,12 @@ const VERBS: &[(&str, &str)] = &[
 fn tool_schema(verb: &str) -> Value {
     let props = match verb {
         "status" => json!({ "since": { "type": "string" } }),
-        "context" => json!({ "path": { "type": "string" }, "unit": { "type": "string" }, "budget": { "type": "integer" } }),
-        "try" => json!({ "candidates": { "type": "array", "items": { "type": "object" } }, "keep": { "type": "integer" } }),
+        "context" => {
+            json!({ "path": { "type": "string" }, "unit": { "type": "string" }, "budget": { "type": "integer" } })
+        }
+        "try" => {
+            json!({ "candidates": { "type": "array", "items": { "type": "object" } }, "keep": { "type": "integer" } })
+        }
         "query" => {
             json!({ "kind": { "type": "string" }, "scope": { "type": "object" }, "kinds": { "type": "array", "items": { "type": "string" } }, "change": { "type": "string" }, "since": { "type": "string" }, "id": { "type": "string" }, "path": { "type": "string" }, "test": { "type": "string" }, "window": { "type": "string" }, "altitude": { "type": "string" }, "offset": { "type": "integer" }, "tail": { "type": "boolean" }, "budget": { "type": "integer" } })
         }
@@ -45,10 +49,16 @@ fn tool_schema(verb: &str) -> Value {
         "remember" => {
             json!({ "kind": { "type": "string" }, "body": { "type": "string" }, "scope": { "type": "object" }, "confidence": { "type": "number" }, "visibility": { "type": "string" }, "idem": { "type": "string" } })
         }
-        "verify" => json!({ "kinds": { "type": "array", "items": { "type": "string" } }, "full": { "type": "boolean" } }),
-        "promote" => json!({ "to": { "type": "string" }, "slice": { "type": "string" }, "idem": { "type": "string" } }),
+        "verify" => {
+            json!({ "kinds": { "type": "array", "items": { "type": "string" } }, "full": { "type": "boolean" } })
+        }
+        "promote" => {
+            json!({ "to": { "type": "string" }, "slice": { "type": "string" }, "idem": { "type": "string" } })
+        }
         "undo" => json!({ "op": { "type": "string" }, "idem": { "type": "string" } }),
-        "revert" => json!({ "change": { "type": "string" }, "reason": { "type": "string" }, "idem": { "type": "string" } }),
+        "revert" => {
+            json!({ "change": { "type": "string" }, "reason": { "type": "string" }, "idem": { "type": "string" } })
+        }
         _ => json!({}),
     };
     json!({ "type": "object", "properties": props })

@@ -9,10 +9,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use tessra_core::hash;
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 pub mod pack;
 

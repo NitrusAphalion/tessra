@@ -17,9 +17,12 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use ciborium::value::Value as Cbor;
+use serde_bytes::ByteBuf;
+use serde_json::{json, Value as Json};
 use tessra_core::cbor;
 use tessra_core::object::{
-    Attestation, Deployment, Effect, Memory, MemoryScope, Release, Revision, Snapshot, Standard, Target,
+    Attestation, Deployment, Effect, Memory, MemoryScope, Release, Revision, Snapshot, Standard,
+    Target,
 };
 use tessra_core::sig::SignedObject;
 use tessra_core::store::ObjectStore;
@@ -27,8 +30,6 @@ use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
 use tessra_oplog::standard;
 use tessra_oplog::view::ViewState;
-use serde_bytes::ByteBuf;
-use serde_json::{json, Value as Json};
 
 use crate::hooks::{self, Event};
 use crate::principals::Actor;
@@ -43,7 +44,9 @@ pub fn all_targets(repo: &Repo) -> Result<Vec<(EntityId, ObjectId, Target)>> {
     let mut out = Vec::new();
     for (id, ptr) in vs.entities(&view)? {
         let Ok(oid) = ptr.single() else { continue };
-        let Some(bytes) = repo.store().get_bytes(&oid)? else { continue };
+        let Some(bytes) = repo.store().get_bytes(&oid)? else {
+            continue;
+        };
         if cbor::peek_tag(&bytes).ok().as_deref() == Some("target") {
             if let Ok(t) = cbor::decode::<Target>(&bytes) {
                 out.push((id, oid, t));
@@ -96,7 +99,14 @@ pub fn create_target(
         let p = standard::parse_predicate(text).map_err(|e| Error::verb("ARGS", e))?;
         let mut m = BTreeMap::from([("kind".to_string(), Cbor::Text(p.kind.clone()))]);
         if let Some(n) = p.name {
-            m.insert(if p.kind == "dir" { "path".into() } else { "cmd".into() }, Cbor::Text(n));
+            m.insert(
+                if p.kind == "dir" {
+                    "path".into()
+                } else {
+                    "cmd".into()
+                },
+                Cbor::Text(n),
+            );
         }
         for (k, v) in p.args.unwrap_or_default() {
             m.insert(k, v);
@@ -110,7 +120,10 @@ pub fn create_target(
             Cbor::Array(secrets.iter().map(|s| Cbor::Text(s.clone())).collect()),
         );
     }
-    deployer_map.insert("canary_percent".into(), Cbor::Integer(canary_percent.into()));
+    deployer_map.insert(
+        "canary_percent".into(),
+        Cbor::Integer(canary_percent.into()),
+    );
     let trunk_std = crate::verbs::trunk_standard_of(repo)?;
     let t = now();
     let std = Standard {
@@ -136,7 +149,12 @@ pub fn create_target(
         observers: if observers.is_empty() {
             None
         } else {
-            Some(observers.iter().map(|o| adapter(o)).collect::<Result<Vec<_>>>()?)
+            Some(
+                observers
+                    .iter()
+                    .map(|o| adapter(o))
+                    .collect::<Result<Vec<_>>>()?,
+            )
         },
         risk_budget: None,
         sensitivity: None,
@@ -150,21 +168,35 @@ pub fn create_target(
         build::args_with_idem(EntityId::random().0, BTreeMap::new()),
         vec![
             Effect::Put { id: std_oid },
-            Effect::Point { entity: std.id, to: std_oid, from: None },
+            Effect::Point {
+                entity: std.id,
+                to: std_oid,
+                from: None,
+            },
             Effect::Put { id: target_oid },
-            Effect::Point { entity: target.id, to: target_oid, from: None },
+            Effect::Point {
+                entity: target.id,
+                to: target_oid,
+                from: None,
+            },
         ],
         t,
     )?;
     repo.commit_op(&op)?;
-    Ok(json!({ "target": target.id.to_letters(), "name": name, "standard": std.id.to_letters(), "deployer": deployer, "observers": observers, "canary_percent": canary_percent }))
+    Ok(
+        json!({ "target": target.id.to_letters(), "name": name, "standard": std.id.to_letters(), "deployer": deployer, "observers": observers, "canary_percent": canary_percent }),
+    )
 }
 
 pub fn describe_target(repo: &Repo, id: &EntityId, t: &Target) -> Result<Json> {
     let dep = deployed(repo, id)?;
     let (rev_title, slice) = match &dep {
         Some((_, d)) => {
-            let title = repo.store().get::<Revision>(&d.revision).map(|r| r.title).unwrap_or_default();
+            let title = repo
+                .store()
+                .get::<Revision>(&d.revision)
+                .map(|r| r.title)
+                .unwrap_or_default();
             let slice = d.step.as_ref().and_then(|s| text(s, "of"));
             (Some(title), slice)
         }
@@ -186,7 +218,11 @@ pub fn cut_release(repo: &mut Repo, actor: &Actor, name: &str) -> Result<Json> {
     let (head_id, _) = crate::verbs::trunk_head_of(repo)?;
     let head: Revision = repo.store().get(&head_id)?;
     let view = repo.log.current_view()?;
-    let line = view.lines.get("trunk").map(|l| l.id).ok_or_else(|| Error::verb("LINE", "no trunk"))?;
+    let line = view
+        .lines
+        .get("trunk")
+        .map(|l| l.id)
+        .ok_or_else(|| Error::verb("LINE", "no trunk"))?;
     let previous = releases(repo)?.into_iter().next();
     let since = previous.as_ref().map(|(_, r)| r.revision);
     // Titles from the head back to the previous release's revision.
@@ -199,23 +235,39 @@ pub fn cut_release(repo: &mut Repo, actor: &Actor, name: &str) -> Result<Json> {
         }
         steps += 1;
         let r: Revision = repo.store().get(&id)?;
-        lines.push(format!("- {} ({})", r.title, repo.principal_name(&r.author).unwrap_or_default()));
+        lines.push(format!(
+            "- {} ({})",
+            r.title,
+            repo.principal_name(&r.author).unwrap_or_default()
+        ));
         cur = r.parents.first().copied();
     }
-    let changelog = repo.store().put_blob(format!("{name}\n\n{}\n", lines.join("\n")).as_bytes())?;
+    let changelog = repo
+        .store()
+        .put_blob(format!("{name}\n\n{}\n", lines.join("\n")).as_bytes())?;
     let (snap_id, _) = crate::verbs::root_snapshot_of(repo, &head)?;
     let (_, idx) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
-    let attestations: Vec<ObjectId> = crate::verifiers::collect_for(repo, &head_id, &head, Some(&idx))?
-        .into_iter()
-        .filter(|id| repo.store().get::<Attestation>(id).map(|a| crate::verifiers::trusted_signer(repo, &a)).unwrap_or(false))
-        .collect();
+    let attestations: Vec<ObjectId> =
+        crate::verifiers::collect_for(repo, &head_id, &head, Some(&idx))?
+            .into_iter()
+            .filter(|id| {
+                repo.store()
+                    .get::<Attestation>(id)
+                    .map(|a| crate::verifiers::trusted_signer(repo, &a))
+                    .unwrap_or(false)
+            })
+            .collect();
     let mut release = Release {
         name: name.into(),
         line,
         revision: head_id,
         since,
         changelog,
-        attestations: if attestations.is_empty() { None } else { Some(attestations.clone()) },
+        attestations: if attestations.is_empty() {
+            None
+        } else {
+            Some(attestations.clone())
+        },
         signer: actor.principal(),
         time: now(),
         sig: None,
@@ -235,14 +287,24 @@ pub fn cut_release(repo: &mut Repo, actor: &Actor, name: &str) -> Result<Json> {
     let mut list = repo.store().meta("releases")?.unwrap_or_default();
     list.extend_from_slice(rid.as_bytes());
     repo.store().set_meta("releases", &list)?;
-    let hooks_out = hooks::fire(repo, &Event::new(repo, "released", head_id, &head, json!({ "release": name }))?)?;
-    Ok(json!({ "release": rid.to_hex(), "name": name, "revision": head_id.to_hex(), "title": head.title, "changes": lines.len(), "attestations": attestations.len(), "since": since.map(|s| s.to_hex()), "hooks": hooks_out }))
+    let hooks_out = hooks::fire(
+        repo,
+        &Event::new(repo, "released", head_id, &head, json!({ "release": name }))?,
+    )?;
+    Ok(
+        json!({ "release": rid.to_hex(), "name": name, "revision": head_id.to_hex(), "title": head.title, "changes": lines.len(), "attestations": attestations.len(), "since": since.map(|s| s.to_hex()), "hooks": hooks_out }),
+    )
 }
 
 /// Releases, newest first.
 pub fn releases(repo: &Repo) -> Result<Vec<(ObjectId, Release)>> {
     let mut out = Vec::new();
-    for chunk in repo.store().meta("releases")?.unwrap_or_default().chunks(32) {
+    for chunk in repo
+        .store()
+        .meta("releases")?
+        .unwrap_or_default()
+        .chunks(32)
+    {
         if let Ok(id) = ObjectId::from_slice(chunk) {
             if let Ok(r) = repo.store().get::<Release>(&id) {
                 out.push((id, r));
@@ -273,7 +335,12 @@ fn secrets_env(repo: &Repo, deployer: &BTreeMap<String, Cbor>) -> Vec<(String, S
     out
 }
 
-fn run_adapter(cmd: &str, env: &[(String, String)], cwd: Option<&PathBuf>, timeout: Duration) -> Result<(bool, String)> {
+fn run_adapter(
+    cmd: &str,
+    env: &[(String, String)],
+    cwd: Option<&PathBuf>,
+    timeout: Duration,
+) -> Result<(bool, String)> {
     let argv: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
     if argv.is_empty() {
         return Err(Error::verb("ADAPTER", "empty command"));
@@ -289,7 +356,9 @@ fn run_adapter(cmd: &str, env: &[(String, String)], cwd: Option<&PathBuf>, timeo
     c.stdin(Stdio::null());
     c.stdout(Stdio::piped());
     c.stderr(Stdio::piped());
-    let mut child = c.spawn().map_err(|e| Error::verb("ADAPTER", format!("cannot run {}: {e}", argv[0])))?;
+    let mut child = c
+        .spawn()
+        .map_err(|e| Error::verb("ADAPTER", format!("cannot run {}: {e}", argv[0])))?;
     let started = std::time::Instant::now();
     let status = loop {
         if let Some(s) = child.try_wait()? {
@@ -311,7 +380,14 @@ fn run_adapter(cmd: &str, env: &[(String, String)], cwd: Option<&PathBuf>, timeo
 
 /// Deploy a revision to a target's slice: the target's standard for the
 /// `all` slice, trunk's for a canary; the adapter; a deployment effect.
-pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Option<ObjectId>, slice: &str, step_kind: &str) -> Result<Json> {
+pub fn deploy(
+    repo: &mut Repo,
+    actor: &Actor,
+    target_name: &str,
+    revision: Option<ObjectId>,
+    slice: &str,
+    step_kind: &str,
+) -> Result<Json> {
     let (tid, _, target) = target_by_name(repo, target_name)?;
     let rev_id = match revision {
         Some(r) => r,
@@ -324,7 +400,11 @@ pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Optio
     let std_id = if slice == "canary" {
         let view = repo.log.current_view()?;
         let vs = ViewState::new(repo.store());
-        let s: Standard = repo.store().get(&vs.entity(&view, &target.standard)?.ok_or_else(|| Error::verb("STANDARD", "target standard missing"))?.single()?)?;
+        let s: Standard = repo.store().get(
+            &vs.entity(&view, &target.standard)?
+                .ok_or_else(|| Error::verb("STANDARD", "target standard missing"))?
+                .single()?,
+        )?;
         s.extends.unwrap_or(target.standard)
     } else {
         target.standard
@@ -336,20 +416,34 @@ pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Optio
         let vs = ViewState::new(repo.store());
         let unmet = standard::evaluate(repo.store(), &vs, &view, &std_id, &rev_id, &rev, &attests)?;
         if !unmet.is_empty() {
-            let list: Vec<Json> = unmet.iter().map(|u| json!({ "clause": u.clause, "reason": u.reason })).collect();
-            return Err(Error::verb("STANDARD_UNMET", serde_json::to_string(&list).unwrap_or_default()));
+            let list: Vec<Json> = unmet
+                .iter()
+                .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
+                .collect();
+            return Err(Error::verb(
+                "STANDARD_UNMET",
+                serde_json::to_string(&list).unwrap_or_default(),
+            ));
         }
     }
     let previous = deployed(repo, &tid)?;
     let percent: u64 = match slice {
-        "canary" => target.deployer.get("canary_percent").and_then(|v| match v {
-            Cbor::Integer(i) => Some(i128::from(*i) as u64),
-            _ => None,
-        }).unwrap_or(10),
+        "canary" => target
+            .deployer
+            .get("canary_percent")
+            .and_then(|v| match v {
+                Cbor::Integer(i) => Some(i128::from(*i) as u64),
+                _ => None,
+            })
+            .unwrap_or(10),
         _ => 100,
     };
     // Run the adapter.
-    let scratch = crate::verifiers::materialize_scratch(repo, &snap.root, &format!("deploy-{}", &snap_id.to_hex()[..12]))?;
+    let scratch = crate::verifiers::materialize_scratch(
+        repo,
+        &snap.root,
+        &format!("deploy-{}", &snap_id.to_hex()[..12]),
+    )?;
     let kind = text(&target.deployer, "kind").unwrap_or_default();
     let mut env: Vec<(String, String)> = vec![
         ("TESSRA_TARGET".into(), target_name.into()),
@@ -373,17 +467,29 @@ pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Optio
             let (okk, out) = run_adapter(&cmd, &env, Some(&scratch), Duration::from_secs(600))?;
             if !okk {
                 let _ = std::fs::remove_dir_all(&scratch);
-                return Err(Error::verb("DEPLOY", format!("deployer failed: {}", out.chars().take(300).collect::<String>())));
+                return Err(Error::verb(
+                    "DEPLOY",
+                    format!(
+                        "deployer failed: {}",
+                        out.chars().take(300).collect::<String>()
+                    ),
+                ));
             }
             json!({ "kind": "run", "output": out.chars().take(300).collect::<String>() })
         }
         other => {
             let _ = std::fs::remove_dir_all(&scratch);
-            return Err(Error::verb("ADAPTER", format!("deployer kind {other} is not available yet")));
+            return Err(Error::verb(
+                "ADAPTER",
+                format!("deployer kind {other} is not available yet"),
+            ));
         }
     };
     let _ = std::fs::remove_dir_all(&scratch);
-    let release = releases(repo)?.into_iter().find(|(_, r)| r.revision == rev_id).map(|(id, _)| id);
+    let release = releases(repo)?
+        .into_iter()
+        .find(|(_, r)| r.revision == rev_id)
+        .map(|(id, _)| id);
     let dep = Deployment {
         target: tid,
         revision: rev_id,
@@ -404,12 +510,31 @@ pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Optio
         actor.cap,
         "deploy",
         build::args_with_idem(EntityId::random().0, BTreeMap::new()),
-        vec![Effect::Put { id: dep_id }, Effect::Deploy { target: tid, to: dep_id }],
+        vec![
+            Effect::Put { id: dep_id },
+            Effect::Deploy {
+                target: tid,
+                to: dep_id,
+            },
+        ],
         now(),
     )?;
     repo.commit_op(&op)?;
-    let event_kind = if step_kind == "rollback" { "target.rolled_back" } else { "deployed" };
-    let hooks_out = hooks::fire(repo, &Event::new(repo, event_kind, rev_id, &rev, json!({ "target": target_name, "slice": slice, "percent": percent, "deployment": dep_id.to_hex() }))?)?;
+    let event_kind = if step_kind == "rollback" {
+        "target.rolled_back"
+    } else {
+        "deployed"
+    };
+    let hooks_out = hooks::fire(
+        repo,
+        &Event::new(
+            repo,
+            event_kind,
+            rev_id,
+            &rev,
+            json!({ "target": target_name, "slice": slice, "percent": percent, "deployment": dep_id.to_hex() }),
+        )?,
+    )?;
     Ok(json!({
         "target": target_name, "slice": slice, "percent": percent, "deployment": dep_id.to_hex(), "revision": rev_id.to_hex(), "title": rev.title,
         "previous": previous.map(|(id, _)| id.to_hex()), "release": release.map(|r| r.to_hex()), "adapter": adapter_out, "step": step_kind, "hooks": hooks_out,
@@ -425,11 +550,19 @@ pub fn deploy(repo: &mut Repo, actor: &Actor, target_name: &str, revision: Optio
 pub fn observe(repo: &mut Repo, actor: &Actor, target_name: &str) -> Result<Json> {
     let (tid, _, target) = target_by_name(repo, target_name)?;
     let Some((dep_id, dep)) = deployed(repo, &tid)? else {
-        return Err(Error::verb("NOT_DEPLOYED", format!("nothing is deployed to {target_name}")));
+        return Err(Error::verb(
+            "NOT_DEPLOYED",
+            format!("nothing is deployed to {target_name}"),
+        ));
     };
     let rev: Revision = repo.store().get(&dep.revision)?;
-    let slice = dep.step.as_ref().and_then(|s| text(s, "of")).unwrap_or_else(|| "all".into());
-    let observer_principal = crate::verifiers::ensure_verifier(repo, &format!("observer-{target_name}"))?;
+    let slice = dep
+        .step
+        .as_ref()
+        .and_then(|s| text(s, "of"))
+        .unwrap_or_else(|| "all".into());
+    let observer_principal =
+        crate::verifiers::ensure_verifier(repo, &format!("observer-{target_name}"))?;
     let mut signals: BTreeMap<String, f64> = BTreeMap::new();
     let mut attested = Vec::new();
     for o in target.observers.clone().unwrap_or_default() {
@@ -478,7 +611,15 @@ pub fn observe(repo: &mut Repo, actor: &Actor, target_name: &str) -> Result<Json
         att.sign_with(repo.daemon_key())?;
         let id = repo.store().put(&att)?;
         let signer = repo.daemon_signer();
-        let op = build::build_op(&repo.log, &signer, None, "attest", build::args_with_idem(EntityId::random().0, BTreeMap::new()), vec![Effect::Put { id }], now())?;
+        let op = build::build_op(
+            &repo.log,
+            &signer,
+            None,
+            "attest",
+            build::args_with_idem(EntityId::random().0, BTreeMap::new()),
+            vec![Effect::Put { id }],
+            now(),
+        )?;
         repo.commit_op(&op)?;
         attested.push(json!({ "signal": name, "value": value, "permille": permille, "attestation": id.to_hex() }));
     }
@@ -488,18 +629,46 @@ pub fn observe(repo: &mut Repo, actor: &Actor, target_name: &str) -> Result<Json
     let attests = crate::verifiers::collect_for(repo, &dep.revision, &rev, Some(&idx))?;
     let view = repo.log.current_view()?;
     let vs = ViewState::new(repo.store());
-    let unmet = standard::evaluate(repo.store(), &vs, &view, &target.standard, &dep.revision, &rev, &attests)?;
-    let tripped: Vec<&standard::Unmet> = unmet.iter().filter(|u| u.clause.contains("observe(")).collect();
+    let unmet = standard::evaluate(
+        repo.store(),
+        &vs,
+        &view,
+        &target.standard,
+        &dep.revision,
+        &rev,
+        &attests,
+    )?;
+    let tripped: Vec<&standard::Unmet> = unmet
+        .iter()
+        .filter(|u| u.clause.contains("observe("))
+        .collect();
     let mut result = json!({
         "target": target_name, "deployment": dep_id.to_hex(), "revision": dep.revision.to_hex(), "title": rev.title, "slice": slice,
         "signals": attested, "unmet": unmet.iter().map(|u| json!({ "clause": u.clause, "reason": u.reason })).collect::<Vec<_>>(),
         "tripped": !tripped.is_empty(),
     });
-    let hooks_out = hooks::fire(repo, &Event::new(repo, if tripped.is_empty() { "observed" } else { "observed.fail" }, dep.revision, &rev, json!({ "target": target_name, "signals": signals, "unmet": result["unmet"].clone() }))?)?;
+    let hooks_out = hooks::fire(
+        repo,
+        &Event::new(
+            repo,
+            if tripped.is_empty() {
+                "observed"
+            } else {
+                "observed.fail"
+            },
+            dep.revision,
+            &rev,
+            json!({ "target": target_name, "signals": signals, "unmet": result["unmet"].clone() }),
+        )?,
+    )?;
     result["hooks"] = json!(hooks_out);
     let auto = !matches!(repo.config().get("auto_revert"), Some(Cbor::Bool(false)));
     if !tripped.is_empty() && auto {
-        let why = tripped.iter().map(|u| format!("{}: {}", u.clause, u.reason)).collect::<Vec<_>>().join("; ");
+        let why = tripped
+            .iter()
+            .map(|u| format!("{}: {}", u.clause, u.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
         result["rollback"] = json!(rollback(repo, actor, target_name, &why)?);
     }
     Ok(result)
@@ -510,7 +679,10 @@ pub fn observe(repo: &mut Repo, actor: &Actor, target_name: &str) -> Result<Json
 pub fn rollback(repo: &mut Repo, actor: &Actor, target_name: &str, why: &str) -> Result<Json> {
     let (tid, _, _) = target_by_name(repo, target_name)?;
     let Some((dep_id, dep)) = deployed(repo, &tid)? else {
-        return Err(Error::verb("NOT_DEPLOYED", format!("nothing is deployed to {target_name}")));
+        return Err(Error::verb(
+            "NOT_DEPLOYED",
+            format!("nothing is deployed to {target_name}"),
+        ));
     };
     // The previous deployment of a different revision: a canary of the
     // same revision is not a place to go back to.
@@ -530,10 +702,20 @@ pub fn rollback(repo: &mut Repo, actor: &Actor, target_name: &str, why: &str) ->
         cursor = d.previous;
     }
     let Some(prev) = prev else {
-        return Err(Error::verb("ROLLBACK", "no earlier deployment of another revision to roll back to"));
+        return Err(Error::verb(
+            "ROLLBACK",
+            "no earlier deployment of another revision to roll back to",
+        ));
     };
     let current_rev: Revision = repo.store().get(&dep.revision)?;
-    let deployed_json = deploy(repo, actor, target_name, Some(prev.revision), "all", "rollback")?;
+    let deployed_json = deploy(
+        repo,
+        actor,
+        target_name,
+        Some(prev.revision),
+        "all",
+        "rollback",
+    )?;
     let task = Memory {
         id: EntityId::random(),
         prev: None,
@@ -555,14 +737,31 @@ pub fn rollback(repo: &mut Repo, actor: &Actor, target_name: &str, why: &str) ->
     };
     let task_oid = repo.store().put(&task)?;
     let signer = repo.daemon_signer();
-    let op = build::build_op(&repo.log, &signer, None, "revert", build::args_with_idem(EntityId::random().0, BTreeMap::new()), vec![Effect::Put { id: task_oid }, Effect::Point { entity: task.id, to: task_oid, from: None }], now())?;
+    let op = build::build_op(
+        &repo.log,
+        &signer,
+        None,
+        "revert",
+        build::args_with_idem(EntityId::random().0, BTreeMap::new()),
+        vec![
+            Effect::Put { id: task_oid },
+            Effect::Point {
+                entity: task.id,
+                to: task_oid,
+                from: None,
+            },
+        ],
+        now(),
+    )?;
     repo.commit_op(&op)?;
     let message = json!({
         "event": "target.rolled_back", "target": target_name, "from": current_rev.title, "change": current_rev.id.to_letters(),
         "to_revision": prev.revision.to_hex(), "why": why, "task": task.id.to_letters(), "deployment": dep_id.to_hex(),
     });
     let delivered = crate::verbs::deliver_to_channels(repo, &message, None)?;
-    Ok(json!({ "rolled_back": true, "to": deployed_json["revision"], "task": task.id.to_letters(), "why": why, "notified": delivered }))
+    Ok(
+        json!({ "rolled_back": true, "to": deployed_json["revision"], "task": task.id.to_letters(), "why": why, "notified": delivered }),
+    )
 }
 
 /// The delivery stage of a revision: deployed and observed, deployed, released, or none.
@@ -585,8 +784,18 @@ pub fn delivery_stage(repo: &Repo, rev_id: &ObjectId) -> Result<Option<&'static 
 }
 
 pub fn describe_release(repo: &Repo, id: &ObjectId, r: &Release) -> Json {
-    let title = repo.store().get::<Revision>(&r.revision).map(|x| x.title).unwrap_or_default();
-    let changelog = repo.store().get_bytes(&r.changelog).ok().flatten().map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let title = repo
+        .store()
+        .get::<Revision>(&r.revision)
+        .map(|x| x.title)
+        .unwrap_or_default();
+    let changelog = repo
+        .store()
+        .get_bytes(&r.changelog)
+        .ok()
+        .flatten()
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_default();
     json!({ "release": id.to_hex(), "name": r.name, "revision": r.revision.to_hex(), "title": title, "signer": repo.principal_name(&r.signer).unwrap_or_default(), "time": r.time, "attestations": r.attestations.as_ref().map(|a| a.len()).unwrap_or(0), "changelog": changelog })
 }
 

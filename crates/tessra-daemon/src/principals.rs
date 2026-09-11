@@ -119,7 +119,9 @@ impl Repo {
     }
 
     fn grant_path(&self, agent_name: &str) -> PathBuf {
-        self.keys_dir.join("grants").join(format!("{}.json", safe_name(agent_name)))
+        self.keys_dir
+            .join("grants")
+            .join(format!("{}.json", safe_name(agent_name)))
     }
 
     /// The standing grant for an agent's sessions, set by the owner.
@@ -154,7 +156,12 @@ impl Repo {
 
     /// The write scope a session for this agent gets: the planner's
     /// assignment, else the owner's grant, else what the caller asked for.
-    pub fn effective_write_paths(&self, agent_id: &EntityId, agent_name: &str, asked: Vec<String>) -> Vec<String> {
+    pub fn effective_write_paths(
+        &self,
+        agent_id: &EntityId,
+        agent_name: &str,
+        asked: Vec<String>,
+    ) -> Vec<String> {
         if let Some(a) = crate::swarm::load_assignment(self, agent_id) {
             if !a.paths.is_empty() {
                 return a.paths;
@@ -170,7 +177,12 @@ impl Repo {
 
     /// Point a persisted session at a new capability, such as one a planner
     /// delegated to it.
-    pub fn set_session_cap(&self, agent_name: &str, write_paths: &[String], cap: ObjectId) -> Result<()> {
+    pub fn set_session_cap(
+        &self,
+        agent_name: &str,
+        write_paths: &[String],
+        cap: ObjectId,
+    ) -> Result<()> {
         let (meta_path, _) = self.session_files(agent_name, write_paths);
         let meta = std::fs::read_to_string(&meta_path)?;
         let mut lines: Vec<String> = meta.lines().map(str::to_string).collect();
@@ -185,11 +197,14 @@ impl Repo {
     pub fn principal_name(&self, id: &EntityId) -> Option<String> {
         let view = self.log.current_view().ok()?;
         let vs = tessra_oplog::ViewState::new(self.store());
-        let (_, p) = tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, id).ok()??;
+        let (_, p) =
+            tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, id).ok()??;
         match p.kind.as_str() {
             "session" => {
                 let parent = p.parent?;
-                let (_, a) = tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, &parent).ok()??;
+                let (_, a) =
+                    tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, &parent)
+                        .ok()??;
                 Some(a.name)
             }
             _ => Some(p.name),
@@ -200,7 +215,8 @@ impl Repo {
     pub fn session_agent(&self, session: &EntityId) -> Option<EntityId> {
         let view = self.log.current_view().ok()?;
         let vs = tessra_oplog::ViewState::new(self.store());
-        let (_, p) = tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, session).ok()??;
+        let (_, p) =
+            tessra_oplog::verify::resolve_principal(self.store(), &vs, &view, session).ok()??;
         if p.kind == "session" {
             p.parent
         } else {
@@ -209,7 +225,9 @@ impl Repo {
     }
 
     pub fn is_revoked(&self, id: &EntityId) -> bool {
-        let Ok(view) = self.log.current_view() else { return false };
+        let Ok(view) = self.log.current_view() else {
+            return false;
+        };
         let vs = tessra_oplog::ViewState::new(self.store());
         vs.principal_revoked(&view, id).unwrap_or(false)
     }
@@ -225,7 +243,10 @@ impl Repo {
     ) -> Result<Actor> {
         let (agent_id, agent_key) = self.ensure_agent(agent_name, None)?;
         if self.is_revoked(&agent_id) {
-            return Err(Error::verb("REVOKED", format!("agent {agent_name} is revoked")));
+            return Err(Error::verb(
+                "REVOKED",
+                format!("agent {agent_name} is revoked"),
+            ));
         }
         let assignment = crate::swarm::load_assignment(self, &agent_id);
         let template = self.grant_template(agent_name);
@@ -287,7 +308,9 @@ impl Repo {
             cap.verbs.sort();
             cap.delegable = tpl.delegable;
             if let Some(ops) = tpl.ops {
-                cap.hard.get_or_insert_with(BTreeMap::new).insert("ops".to_string(), ops.max(1));
+                cap.hard
+                    .get_or_insert_with(BTreeMap::new)
+                    .insert("ops".to_string(), ops.max(1));
             }
         }
         if let Some(a) = &assignment {
@@ -342,7 +365,10 @@ impl Repo {
     fn named_paths(&self, dir: &str, name: &str) -> (PathBuf, PathBuf) {
         let dir = self.keys_dir.join(dir);
         let safe = safe_name(name);
-        (dir.join(format!("{safe}.key")), dir.join(format!("{safe}.meta")))
+        (
+            dir.join(format!("{safe}.key")),
+            dir.join(format!("{safe}.meta")),
+        )
     }
 
     /// Create an external principal, such as a CI system, with a capability
@@ -360,7 +386,11 @@ impl Repo {
     }
 
     fn grant_named(&mut self, name: &str, kind: &str) -> Result<(EntityId, ObjectId)> {
-        let dir = if kind == "human" { "humans" } else { "externals" };
+        let dir = if kind == "human" {
+            "humans"
+        } else {
+            "externals"
+        };
         let (key_path, meta_path) = self.named_paths(dir, name);
         if let Ok(meta) = std::fs::read_to_string(&meta_path) {
             let mut lines = meta.lines();
@@ -470,10 +500,17 @@ impl Repo {
         let mut lines = meta.lines();
         let (id, cap) = match (lines.next(), lines.next()) {
             (Some(i), Some(c)) => (
-                EntityId::from_letters(i.trim()).map_err(|e| Error::verb("PRINCIPAL", e.to_string()))?,
-                ObjectId::from_hex(c.trim()).map_err(|e| Error::verb("PRINCIPAL", e.to_string()))?,
+                EntityId::from_letters(i.trim())
+                    .map_err(|e| Error::verb("PRINCIPAL", e.to_string()))?,
+                ObjectId::from_hex(c.trim())
+                    .map_err(|e| Error::verb("PRINCIPAL", e.to_string()))?,
             ),
-            _ => return Err(Error::verb("PRINCIPAL", "external principal record is damaged")),
+            _ => {
+                return Err(Error::verb(
+                    "PRINCIPAL",
+                    "external principal record is damaged",
+                ))
+            }
         };
         let key = paths::read_key(&key_path)?;
         Ok(Actor {
@@ -502,7 +539,13 @@ pub struct GrantTemplate {
 
 fn safe_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

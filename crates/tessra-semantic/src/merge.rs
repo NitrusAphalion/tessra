@@ -128,18 +128,23 @@ pub fn merge_file(
     let mut names_b = match_names(&inferred_b);
     // A recorded rename lines up its unit with the base even when the body
     // changed too and identity could not follow it.
-    for (ops, side_nodes, names) in [(ops_a, a.nodes, &mut names_a), (ops_b, b.nodes, &mut names_b)] {
+    for (ops, side_nodes, names) in [
+        (ops_a, a.nodes, &mut names_a),
+        (ops_b, b.nodes, &mut names_b),
+    ] {
         for r in ops {
             let Some(old) = base_nodes.iter().find(|n| n.name == r.from) else {
                 continue;
             };
-            if side_nodes.iter().any(|n| n.name == r.from && n.kind == old.kind) {
+            if side_nodes
+                .iter()
+                .any(|n| n.name == r.from && n.kind == old.kind)
+            {
                 continue;
             }
-            if let Some(new) = side_nodes
-                .iter()
-                .find(|n| n.name == r.to && n.kind == old.kind && n.parent.is_none() == old.parent.is_none())
-            {
+            if let Some(new) = side_nodes.iter().find(|n| {
+                n.name == r.to && n.kind == old.kind && n.parent.is_none() == old.parent.is_none()
+            }) {
                 names.entry(new.nid).or_insert_with(|| r.from.clone());
             }
         }
@@ -267,8 +272,10 @@ fn emit_leaf(ctx: &Ctx<'_>, side: Side, u: &Unit, out: &mut Vec<u8>, m: &mut Mer
     let body = slice(text, u.span.0, u.span.1);
     let (fixed, applied) = apply_all(body, ctx.renames(side.other()));
     for r in applied {
-        m.resolved
-            .push(format!("{} {}: {} renamed to {}", u.kind, u.name, r.from, r.to));
+        m.resolved.push(format!(
+            "{} {}: {} renamed to {}",
+            u.kind, u.name, r.from, r.to
+        ));
     }
     out.extend_from_slice(&fixed);
 }
@@ -321,11 +328,7 @@ fn merge_level(
         for u in units {
             let added = base.map(|bu| find(bu, &u.key).is_none()).unwrap_or(true);
             if added && u.key.1 == u.name {
-                if let Some(r) = ctx
-                    .renames(side.other())
-                    .iter()
-                    .find(|r| r.to == u.name)
-                {
+                if let Some(r) = ctx.renames(side.other()).iter().find(|r| r.to == u.name) {
                     m.conflicts.push(format!(
                         "{} {} (added on one side, {} renamed to it on the other)",
                         u.kind, u.name, r.from
@@ -447,8 +450,10 @@ fn merge_container(
     push_gap(out, gap_text);
     let (head, applied) = apply_all(head, ctx.renames(gap_side.other()));
     for r in applied {
-        m.resolved
-            .push(format!("{} {}: {} renamed to {}", x.kind, x.name, r.from, r.to));
+        m.resolved.push(format!(
+            "{} {}: {} renamed to {}",
+            x.kind, x.name, r.from, r.to
+        ));
     }
     out.extend_from_slice(&head);
     merge_level(
@@ -640,14 +645,21 @@ mod tests {
         let m = merge(base, &a, &b);
         assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
         let t = String::from_utf8(m.text).unwrap();
-        assert_eq!(t, "fn bee() -> i32 {\n    2\n}\n\nfn c() -> i32 {\n    bee() + 1\n}\n");
+        assert_eq!(
+            t,
+            "fn bee() -> i32 {\n    2\n}\n\nfn c() -> i32 {\n    bee() + 1\n}\n"
+        );
         assert_eq!(m.resolved, vec!["function c: b renamed to bee".to_string()]);
         // A rename plus a real body change on the same unit still conflicts.
         let a2 = base.replace("fn b() -> i32 {\n    2\n}", "fn bee() -> i32 {\n    22\n}");
         let b2 = base.replace("    2\n", "    20\n");
         let m2 = merge_ops(base, &a2, &b2, &[Rename::new("b", "bee")], &[]);
         assert_eq!(m2.conflicts.len(), 1, "{:?}", m2.conflicts);
-        assert!(m2.conflicts[0].contains("renamed on one side"), "{:?}", m2.conflicts);
+        assert!(
+            m2.conflicts[0].contains("renamed on one side"),
+            "{:?}",
+            m2.conflicts
+        );
     }
 
     #[test]
@@ -656,7 +668,11 @@ mod tests {
         let b = BASE.replace("fn b()", "fn bea()");
         let m = merge(BASE, &a, &b);
         assert_eq!(m.conflicts.len(), 1, "{:?}", m.conflicts);
-        assert!(m.conflicts[0].contains("renamed to bee on one side and bea"), "{:?}", m.conflicts);
+        assert!(
+            m.conflicts[0].contains("renamed to bee on one side and bea"),
+            "{:?}",
+            m.conflicts
+        );
     }
 
     #[test]
@@ -678,7 +694,11 @@ mod tests {
         let b = format!("{BASE}\nfn bee() {{ 9 }}\n");
         let m = merge(BASE, &a, &b);
         assert_eq!(m.conflicts.len(), 1, "{:?}", m.conflicts);
-        assert!(m.conflicts[0].contains("added on one side"), "{:?}", m.conflicts);
+        assert!(
+            m.conflicts[0].contains("added on one side"),
+            "{:?}",
+            m.conflicts
+        );
     }
 
     #[test]

@@ -2,22 +2,22 @@
 //! thirteen verbs. `spec/05-layout.md` for the directories, VERBS.md for
 //! the surface.
 
-pub mod client;
-pub mod fs;
-pub mod gitimport;
-pub mod paths;
-pub mod principals;
 pub mod anomaly;
 pub mod bridge;
+pub mod client;
 pub mod delivery;
+pub mod fs;
+pub mod gitimport;
 pub mod hooks;
+pub mod paths;
+pub mod principals;
 pub mod risk;
 pub mod semantic;
-pub mod swarm;
-pub mod verifiers;
 pub mod server;
+pub mod swarm;
 pub mod tree;
 pub mod verbs;
+pub mod verifiers;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -143,7 +143,10 @@ impl Repo {
                 ciborium::value::Value::Bool(paths::is_cloud_synced(&root)),
             ),
         ]);
-        std::fs::write(tessra_dir.join("config"), cbor::to_canonical_bytes(&config)?)?;
+        std::fs::write(
+            tessra_dir.join("config"),
+            cbor::to_canonical_bytes(&config)?,
+        )?;
 
         let daemon_key = SecretKey::generate();
         paths::write_key(&keys_dir.join("daemon.key"), &daemon_key)?;
@@ -246,7 +249,10 @@ impl Repo {
 
     /// Write machine-local configuration to `.tessra/config`.
     pub fn set_config(&self, config: &BTreeMap<String, ciborium::value::Value>) -> Result<()> {
-        std::fs::write(self.tessra_dir.join("config"), cbor::to_canonical_bytes(config)?)?;
+        std::fs::write(
+            self.tessra_dir.join("config"),
+            cbor::to_canonical_bytes(config)?,
+        )?;
         Ok(())
     }
 

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value as Cbor;
+use serde_bytes::ByteBuf;
 use tessra_core::cbor;
 use tessra_core::object::{Attestation, Effect, Environment, Node, NodeIndex, Principal, Revision};
 use tessra_core::sig::{SecretKey, SignedObject};
@@ -23,7 +24,6 @@ use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
 use tessra_store::RedbStore;
-use serde_bytes::ByteBuf;
 
 use crate::{fs, now, paths, Error, Repo, Result};
 
@@ -106,7 +106,12 @@ pub fn ensure_index(store: &RedbStore) -> Result<()> {
 /// Every attestation that could apply to a revision: by subject on the
 /// revision, its previous revision, and its snapshots, and by body on
 /// every body its index carries.
-pub fn collect_for(repo: &Repo, rev_id: &ObjectId, rev: &Revision, idx: Option<&NodeIndex>) -> Result<Vec<ObjectId>> {
+pub fn collect_for(
+    repo: &Repo,
+    rev_id: &ObjectId,
+    rev: &Revision,
+    idx: Option<&NodeIndex>,
+) -> Result<Vec<ObjectId>> {
     let store = repo.store();
     let mut seen: HashSet<ObjectId> = HashSet::new();
     let mut out = Vec::new();
@@ -156,7 +161,9 @@ pub fn by_body(store: &RedbStore, body: &ObjectId) -> Result<Vec<(ObjectId, Atte
 /// Whether an attestation's signer is a principal standards trust.
 pub fn trusted_signer(repo: &Repo, att: &Attestation) -> bool {
     let signer = att.runner.unwrap_or(att.verifier);
-    let Ok(view) = repo.log.current_view() else { return false };
+    let Ok(view) = repo.log.current_view() else {
+        return false;
+    };
     let vs = tessra_oplog::view::ViewState::new(repo.store());
     match vs.entity(&view, &signer) {
         Ok(Some(p)) => p
@@ -169,7 +176,11 @@ pub fn trusted_signer(repo: &Repo, att: &Attestation) -> bool {
 }
 
 /// Attestations of one kind on a subject, newest first.
-pub fn on_subject(store: &RedbStore, kind: &str, subject: &[u8]) -> Result<Vec<(ObjectId, Attestation)>> {
+pub fn on_subject(
+    store: &RedbStore,
+    kind: &str,
+    subject: &[u8],
+) -> Result<Vec<(ObjectId, Attestation)>> {
     let mut out = Vec::new();
     for id in ids_at(store, &att_subject_key(subject))? {
         let a: Attestation = store.get(&id)?;
@@ -267,7 +278,10 @@ pub fn verifiers_for(repo: &Repo, dir: &Path) -> Vec<Verifier> {
 pub fn environment(repo: &Repo, v: &Verifier) -> Result<ObjectId> {
     let mut tools = BTreeMap::new();
     let probe = |cmd: &str| -> Option<String> {
-        let out = crate::quiet(Command::new(cmd)).arg("--version").output().ok()?;
+        let out = crate::quiet(Command::new(cmd))
+            .arg("--version")
+            .output()
+            .ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() {
             None
@@ -305,7 +319,13 @@ pub fn ensure_verifier(repo: &mut Repo, name: &str) -> Result<EntityId> {
     std::fs::create_dir_all(&dir)?;
     let safe: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let id_path = dir.join(format!("{safe}.id"));
     if id_path.exists() {
@@ -397,7 +417,13 @@ pub struct RunOutcome {
 
 /// Run a verifier in `dir` with a stripped environment and a timeout.
 /// `select` names tests to run; empty means the whole suite.
-pub fn run(repo: &Repo, v: &Verifier, dir: &Path, select: &[String], timeout: Duration) -> Result<RunOutcome> {
+pub fn run(
+    repo: &Repo,
+    v: &Verifier,
+    dir: &Path,
+    select: &[String],
+    timeout: Duration,
+) -> Result<RunOutcome> {
     let mut argv = v.argv.clone();
     match (v.filter, select.is_empty()) {
         (Filter::Cargo, false) => {
@@ -420,21 +446,51 @@ pub fn run(repo: &Repo, v: &Verifier, dir: &Path, select: &[String], timeout: Du
         let key = k.to_string_lossy().to_ascii_uppercase();
         let keep = matches!(
             key.as_str(),
-            "PATH" | "HOME" | "USERPROFILE" | "TEMP" | "TMP" | "TMPDIR" | "SYSTEMROOT" | "WINDIR"
-                | "COMSPEC" | "PATHEXT" | "LANG" | "LC_ALL" | "CARGO_HOME" | "RUSTUP_HOME"
-                | "RUSTUP_TOOLCHAIN" | "PROGRAMDATA" | "PROGRAMFILES" | "PROGRAMFILES(X86)"
-                | "LOCALAPPDATA" | "APPDATA" | "SYSTEMDRIVE" | "NUMBER_OF_PROCESSORS"
-                | "PROCESSOR_ARCHITECTURE" | "VIRTUAL_ENV" | "PYTHONPATH"
-        ) || key.starts_with("VS") || key.starts_with("VCTOOLS") || key.starts_with("WINDOWSSDK")
-            || key.starts_with("UCRT") || key.starts_with("INCLUDE") || key.starts_with("LIB");
-        let secretish = key.contains("TOKEN") || key.contains("SECRET") || key.contains("KEY") && key != "PATHEXT" || key.contains("TESSRA");
+            "PATH"
+                | "HOME"
+                | "USERPROFILE"
+                | "TEMP"
+                | "TMP"
+                | "TMPDIR"
+                | "SYSTEMROOT"
+                | "WINDIR"
+                | "COMSPEC"
+                | "PATHEXT"
+                | "LANG"
+                | "LC_ALL"
+                | "CARGO_HOME"
+                | "RUSTUP_HOME"
+                | "RUSTUP_TOOLCHAIN"
+                | "PROGRAMDATA"
+                | "PROGRAMFILES"
+                | "PROGRAMFILES(X86)"
+                | "LOCALAPPDATA"
+                | "APPDATA"
+                | "SYSTEMDRIVE"
+                | "NUMBER_OF_PROCESSORS"
+                | "PROCESSOR_ARCHITECTURE"
+                | "VIRTUAL_ENV"
+                | "PYTHONPATH"
+        ) || key.starts_with("VS")
+            || key.starts_with("VCTOOLS")
+            || key.starts_with("WINDOWSSDK")
+            || key.starts_with("UCRT")
+            || key.starts_with("INCLUDE")
+            || key.starts_with("LIB");
+        let secretish = key.contains("TOKEN")
+            || key.contains("SECRET")
+            || key.contains("KEY") && key != "PATHEXT"
+            || key.contains("TESSRA");
         if keep && !secretish {
             cmd.env(k, val);
         }
     }
     // One build cache per repository across runs, outside the tree under test.
     if v.argv.first().map(String::as_str) == Some("cargo") {
-        cmd.env("CARGO_TARGET_DIR", paths::workspaces_dir_for(&repo.repo_id).join("verify-target"));
+        cmd.env(
+            "CARGO_TARGET_DIR",
+            paths::workspaces_dir_for(&repo.repo_id).join("verify-target"),
+        );
         cmd.env("CARGO_TERM_COLOR", "never");
     }
     cmd.stdin(Stdio::null());
@@ -636,10 +692,13 @@ pub fn overlay_tests(
         let pos = match t.parent {
             Some(pid) => {
                 let cont = change_nodes.iter().find(|n| n.nid == pid);
-                let in_parent = parent_nodes
-                    .iter()
-                    .find(|n| n.nid == pid)
-                    .or_else(|| cont.and_then(|c| parent_nodes.iter().find(|n| n.kind == c.kind && n.name == c.name)));
+                let in_parent = parent_nodes.iter().find(|n| n.nid == pid).or_else(|| {
+                    cont.and_then(|c| {
+                        parent_nodes
+                            .iter()
+                            .find(|n| n.kind == c.kind && n.name == c.name)
+                    })
+                });
                 match in_parent {
                     Some(pc) => {
                         let last_child_end = parent_nodes
@@ -718,10 +777,17 @@ mod tests {
     fn cargo_and_pytest_output_parse_per_test() {
         let cargo = b"running 3 tests\ntest tests::add_works ... ok\ntest tests::sub_fails ... FAILED\ntest tests::slow ... ignored\n";
         let t = parse_tests(Filter::Cargo, cargo);
-        assert_eq!(t, vec![("tests::add_works".to_string(), true), ("tests::sub_fails".to_string(), false)]);
+        assert_eq!(
+            t,
+            vec![
+                ("tests::add_works".to_string(), true),
+                ("tests::sub_fails".to_string(), false)
+            ]
+        );
         assert!(test_matches("tests::add_works", "add_works"));
         assert!(!test_matches("tests::add_works_more", "add_works"));
-        let py = b"tests/test_x.py::test_add PASSED [ 50%]\ntests/test_x.py::test_sub FAILED [100%]\n";
+        let py =
+            b"tests/test_x.py::test_add PASSED [ 50%]\ntests/test_x.py::test_sub FAILED [100%]\n";
         let t = parse_tests(Filter::Pytest, py);
         assert_eq!(t.len(), 2);
         assert!(t[0].1 && !t[1].1);
@@ -736,17 +802,27 @@ mod tests {
         let pn = nodes("src/lib.rs", parent);
         let raw = tessra_semantic::extract("src/lib.rs", change.as_bytes()).unwrap();
         let cn = assign_ids("src/lib.rs", &raw, &pn);
-        let new_tests: Vec<&Node> = cn.iter().filter(|n| n.kind == "test" && !pn.iter().any(|p| p.nid == n.nid)).collect();
+        let new_tests: Vec<&Node> = cn
+            .iter()
+            .filter(|n| n.kind == "test" && !pn.iter().any(|p| p.nid == n.nid))
+            .collect();
         assert_eq!(new_tests.len(), 1);
         assert_eq!(new_tests[0].name, "saturates");
         let out = overlay_tests(parent.as_bytes(), &pn, change.as_bytes(), &cn, &new_tests);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("    a - b\n"), "the code under test stays the parent's: {text}");
+        assert!(
+            text.contains("    a - b\n"),
+            "the code under test stays the parent's: {text}"
+        );
         assert!(!text.contains("saturating_sub"), "{text}");
         assert!(text.contains("    #[test]\n    fn saturates() {"), "{text}");
         assert!(text.contains("fn old()"), "{text}");
         let reparsed = tessra_semantic::extract("src/lib.rs", text.as_bytes()).unwrap();
-        assert_eq!(reparsed.iter().filter(|n| n.kind == "test").count(), 2, "{text}");
+        assert_eq!(
+            reparsed.iter().filter(|n| n.kind == "test").count(),
+            2,
+            "{text}"
+        );
         assert!(text.trim_end().ends_with('}'), "{text}");
     }
 }

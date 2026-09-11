@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ciborium::value::Value as Cbor;
+use serde_bytes::ByteBuf;
 use tessra_core::object::{EntryKind, Node, NodeIndex, Revision, SemOp, Snapshot};
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
@@ -15,7 +16,6 @@ use tessra_semantic::merge::{merge_file, FileNodes};
 use tessra_semantic::rename::{contains_ident, is_ident, replace_ident, Rename};
 use tessra_semantic::{extract, Language, GRAMMARS};
 use tessra_store::RedbStore;
-use serde_bytes::ByteBuf;
 
 use crate::tree::{self, Flat, Leaf};
 use crate::{Error, Repo, Result};
@@ -117,15 +117,23 @@ pub fn build_nodes(
 pub fn renames_between(base: &NodeIndex, side: &NodeIndex) -> Vec<Rename> {
     let mut by_path_base: HashMap<&str, Vec<Node>> = HashMap::new();
     for n in &base.nodes {
-        by_path_base.entry(n.path.as_str()).or_default().push(n.clone());
+        by_path_base
+            .entry(n.path.as_str())
+            .or_default()
+            .push(n.clone());
     }
     let mut by_path_side: HashMap<&str, Vec<Node>> = HashMap::new();
     for n in &side.nodes {
-        by_path_side.entry(n.path.as_str()).or_default().push(n.clone());
+        by_path_side
+            .entry(n.path.as_str())
+            .or_default()
+            .push(n.clone());
     }
     let mut out = Vec::new();
     for (path, after) in &by_path_side {
-        let Some(before) = by_path_base.get(path) else { continue };
+        let Some(before) = by_path_base.get(path) else {
+            continue;
+        };
         for (nid, r) in inferred_renames(path, before, after) {
             // A method's rename stays within its file; a top-level unit's
             // rename reaches every file that names it.
@@ -222,11 +230,15 @@ pub fn reconcile_aliases(
         let candidate = merged
             .iter()
             .filter(|m| m.path == o.path && !base_ids.contains(&m.nid) && !taken.contains(&m.nid))
-            .find(|m| m.kind == o.kind && m.name == o.name && m.parent.is_some() == o.parent.is_some())
+            .find(|m| {
+                m.kind == o.kind && m.name == o.name && m.parent.is_some() == o.parent.is_some()
+            })
             .or_else(|| {
                 merged
                     .iter()
-                    .filter(|m| m.path == o.path && !base_ids.contains(&m.nid) && !taken.contains(&m.nid))
+                    .filter(|m| {
+                        m.path == o.path && !base_ids.contains(&m.nid) && !taken.contains(&m.nid)
+                    })
                     .find(|m| m.kind == o.kind && m.body == o.body)
             });
         let Some(m) = candidate else { continue };
@@ -293,7 +305,10 @@ pub fn diff_indexes(before: &NodeIndex, after: &NodeIndex) -> Vec<UnitChange> {
             name: n.name.clone(),
             nid: n.nid,
             change,
-            from: prev.get(&n.nid).map(|p| p.name.clone()).filter(|_| change == "renamed"),
+            from: prev
+                .get(&n.nid)
+                .map(|p| p.name.clone())
+                .filter(|_| change == "renamed"),
         });
     }
     for n in &before.nodes {
@@ -412,14 +427,13 @@ pub fn merge_trees(
         } else {
             continue;
         };
-        let applicable: Vec<&Rename> = renames
-            .iter()
-            .filter(|r| r.applies_to(path))
-            .collect();
+        let applicable: Vec<&Rename> = renames.iter().filter(|r| r.applies_to(path)).collect();
         if applicable.is_empty() {
             continue;
         }
-        let Some(text) = store.get_bytes(&blob)? else { continue };
+        let Some(text) = store.get_bytes(&blob)? else {
+            continue;
+        };
         if !applicable.iter().any(|r| contains_ident(&text, &r.from)) {
             continue;
         }
@@ -567,7 +581,15 @@ pub fn blame(repo: &Repo, rev_id: ObjectId, path: &str) -> Result<Vec<BlameEntry
         }
         Ok(cache.get(&id).unwrap())
     }
-    let start_nodes = nodes_of(store, &mut revs, &mut nodes_cache, &mut alias_cache, rev_id, path)?.clone();
+    let start_nodes = nodes_of(
+        store,
+        &mut revs,
+        &mut nodes_cache,
+        &mut alias_cache,
+        rev_id,
+        path,
+    )?
+    .clone();
     let mut out = Vec::new();
     for n in start_nodes {
         // Walk to the oldest revision in which this unit has the same body,
@@ -587,7 +609,14 @@ pub fn blame(repo: &Repo, rev_id: ObjectId, path: &str) -> Result<Vec<BlameEntry
             let cur_aliases = alias_cache.get(&cur).cloned().unwrap_or_default();
             let mut next = None;
             for p in parents {
-                let pn = nodes_of(store, &mut revs, &mut nodes_cache, &mut alias_cache, p, path)?;
+                let pn = nodes_of(
+                    store,
+                    &mut revs,
+                    &mut nodes_cache,
+                    &mut alias_cache,
+                    p,
+                    path,
+                )?;
                 let found = pn
                     .iter()
                     .find(|q| q.nid == track || cur_aliases.get(&q.nid) == Some(&track))
@@ -654,23 +683,43 @@ mod tests {
 
     #[test]
     fn renames_are_inferred_across_the_index_and_scoped_by_level() {
-        let base_lib = nodes("lib.rs", "fn a() { 1 }\nimpl S { fn m(&self) { 2 } }\n", &[]);
+        let base_lib = nodes(
+            "lib.rs",
+            "fn a() { 1 }\nimpl S { fn m(&self) { 2 } }\n",
+            &[],
+        );
         let base = index(base_lib.clone());
-        let side = index(nodes("lib.rs", "fn b() { 1 }\nimpl S { fn n(&self) { 2 } }\n", &base_lib));
+        let side = index(nodes(
+            "lib.rs",
+            "fn b() { 1 }\nimpl S { fn n(&self) { 2 } }\n",
+            &base_lib,
+        ));
         let mut r = renames_between(&base, &side);
         r.sort_by(|x, y| x.from.cmp(&y.from));
         assert_eq!(r.len(), 2, "{r:?}");
-        assert_eq!((r[0].from.as_str(), r[0].to.as_str(), r[0].path.as_deref()), ("a", "b", None));
-        assert_eq!((r[1].from.as_str(), r[1].to.as_str(), r[1].path.as_deref()), ("m", "n", Some("lib.rs")));
+        assert_eq!(
+            (r[0].from.as_str(), r[0].to.as_str(), r[0].path.as_deref()),
+            ("a", "b", None)
+        );
+        assert_eq!(
+            (r[1].from.as_str(), r[1].to.as_str(), r[1].path.as_deref()),
+            ("m", "n", Some("lib.rs"))
+        );
         // The functions are renames; the impl that holds one of them changed,
         // since its body covers its children.
         let d = diff_indexes(&base, &side);
-        let mut changes: Vec<(&str, &str, Option<&str>)> =
-            d.iter().map(|c| (c.kind.as_str(), c.change, c.from.as_deref())).collect();
+        let mut changes: Vec<(&str, &str, Option<&str>)> = d
+            .iter()
+            .map(|c| (c.kind.as_str(), c.change, c.from.as_deref()))
+            .collect();
         changes.sort();
         assert_eq!(
             changes,
-            vec![("function", "renamed", Some("a")), ("function", "renamed", Some("m")), ("impl", "changed", None)]
+            vec![
+                ("function", "renamed", Some("a")),
+                ("function", "renamed", Some("m")),
+                ("impl", "changed", None)
+            ]
         );
     }
 
@@ -684,22 +733,44 @@ mod tests {
         assert_ne!(a_new, b_new);
         // The merged index was matched against side A, so it carries A's ID.
         let mut merged = a_side.clone();
-        let aliases = reconcile_aliases(&mut merged, Some(&index(base_nodes.clone())), &index(b_side.clone()));
+        let aliases = reconcile_aliases(
+            &mut merged,
+            Some(&index(base_nodes.clone())),
+            &index(b_side.clone()),
+        );
         let survivor = merged[1].nid;
         let loser = if survivor == a_new { b_new } else { a_new };
-        assert_eq!(survivor, a_new.min(b_new), "the lexically lower ID survives");
+        assert_eq!(
+            survivor,
+            a_new.min(b_new),
+            "the lexically lower ID survives"
+        );
         assert_eq!(aliases.len(), 1);
-        assert_eq!(aliases.get(&ByteBuf::from(loser.0.to_vec())), Some(&survivor));
-        assert_eq!(merged[0].nid, base_nodes[0].nid, "units from the base are untouched");
+        assert_eq!(
+            aliases.get(&ByteBuf::from(loser.0.to_vec())),
+            Some(&survivor)
+        );
+        assert_eq!(
+            merged[0].nid, base_nodes[0].nid,
+            "units from the base are untouched"
+        );
     }
 
     #[test]
     fn covering_tests_follow_deps_across_files() {
-        let lib = nodes("src/lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn unused() {}\n", &[]);
+        let lib = nodes(
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn unused() {}\n",
+            &[],
+        );
         let mut all = lib.clone();
         // A test in another file that names `add`; the root-wide pass in
         // build_nodes resolves it, modeled here by setting deps directly.
-        let mut t = nodes("tests/t.rs", "#[test]\nfn add_works() { assert_eq!(add(1, 2), 3); }\n", &[]);
+        let mut t = nodes(
+            "tests/t.rs",
+            "#[test]\nfn add_works() { assert_eq!(add(1, 2), 3); }\n",
+            &[],
+        );
         assert_eq!(t[0].kind, "test");
         t[0].deps = Some(vec![lib[0].nid]);
         all.extend(t);

@@ -178,7 +178,13 @@ pub fn import_history<S: ObjectStore>(
     let mut rules_id: Option<ObjectId> = None;
     let mut out = Vec::with_capacity(commits.len());
     for commit in &commits {
-        out.push(content_for_commit(store, root, commit, &mut blob_cache, &mut rules_id)?);
+        out.push(content_for_commit(
+            store,
+            root,
+            commit,
+            &mut blob_cache,
+            &mut rules_id,
+        )?);
     }
     Ok(out)
 }
