@@ -281,10 +281,19 @@ fn emit_leaf(ctx: &Ctx<'_>, side: Side, u: &Unit, out: &mut Vec<u8>, m: &mut Mer
 }
 
 /// A unit's gap from its own side, or a line break when the unit was first
-/// on its side but is not first in the merged output.
+/// on its side but is not first in the merged output. A line holding only
+/// indentation is a container header's lead-in to this very unit, not a
+/// line to break: breaking there de-indents the container's first item.
 fn push_gap(out: &mut Vec<u8>, gap: &[u8]) {
-    if gap.is_empty() && !out.is_empty() && out.last() != Some(&b'\n') {
-        out.push(b'\n');
+    if gap.is_empty() && !out.is_empty() {
+        let line_start = out
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if out[line_start..].iter().any(|b| !b.is_ascii_whitespace()) {
+            out.push(b'\n');
+        }
     }
     out.extend_from_slice(gap);
 }
@@ -699,6 +708,26 @@ mod tests {
             "{:?}",
             m.conflicts
         );
+    }
+
+    #[test]
+    fn insertions_into_the_same_module_keep_its_first_item_indented() {
+        let base = "mod tests {\n    use super::*;\n\n    #[test]\n    fn a() {}\n}\n";
+        let a = base.replace(
+            "    #[test]\n    fn a() {}",
+            "    #[test]\n    fn b() {}\n\n    #[test]\n    fn a() {}",
+        );
+        let b = base.replace(
+            "    #[test]\n    fn a() {}",
+            "    #[test]\n    fn c() {}\n\n    #[test]\n    fn a() {}",
+        );
+        let m = merge(base, &a, &b);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let t = String::from_utf8(m.text).unwrap();
+        assert!(t.starts_with("mod tests {\n    use super::*;\n"), "{t}");
+        for f in ["fn b()", "fn c()", "fn a()"] {
+            assert!(t.contains(f), "{t}");
+        }
     }
 
     #[test]
