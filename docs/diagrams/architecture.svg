@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" width="960" height="430" role="img" aria-label="An agent session speaks MCP over stdio to the tessra CLI, which sends the thirteen verbs as JSON over loopback TCP to a daemon that runs once per repository. The daemon holds sessions and capabilities, the verifier runner, the frontier and semantic merge, the risk monitor, hooks and channels, and the git bridge. It writes signed ops to the store, materializes one workspace per agent, exports to and imports from the colocated git checkout, and notifies humans, CI, and deployers.">
+  <style>
+    .bg{fill:#ffffff}
+    .box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.25}
+    .inner{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+    .blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.25}
+    .t{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:13px;fill:#1f2328}
+    .b{font-weight:600}
+    .m{fill:#59636e;font-size:12px}
+    .c{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px;fill:#1f2328}
+    .ln{stroke:#59636e;stroke-width:1.5;fill:none}
+    .ah{fill:#59636e}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d}
+      .inner{fill:#0d1117;stroke:#30363d}
+      .blue{fill:#0f1e33;stroke:#1f6feb}
+      .t,.c{fill:#e6edf3}
+      .m{fill:#8b949e}
+      .ln{stroke:#8b949e}
+      .ah{fill:#8b949e}
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah"/></marker>
+  </defs>
+  <rect class="bg" width="960" height="430"/>
+
+  <!-- clients -->
+  <rect class="blue" x="20" y="60" width="170" height="60" rx="6"/>
+  <text class="t b" x="105" y="84" text-anchor="middle">Agent session</text>
+  <text class="t m" x="105" y="102" text-anchor="middle">Claude Code · any MCP client</text>
+
+  <rect class="box" x="20" y="170" width="170" height="60" rx="6"/>
+  <text class="t b" x="105" y="194" text-anchor="middle">tessra CLI</text>
+  <text class="t m" x="105" y="212" text-anchor="middle">thin client · MCP server</text>
+
+  <rect class="box" x="20" y="280" width="170" height="60" rx="6"/>
+  <text class="t b" x="105" y="304" text-anchor="middle">Owner, humans</text>
+  <text class="t m" x="105" y="322" text-anchor="middle">standard · grant · approve</text>
+
+  <line class="ln" x1="105" y1="120" x2="105" y2="168" marker-end="url(#a)"/>
+  <text class="t m" x="113" y="148">MCP over stdio</text>
+  <line class="ln" x1="105" y1="280" x2="105" y2="232" marker-end="url(#a)"/>
+  <text class="t m" x="113" y="260">as the owner key</text>
+  <line class="ln" x1="190" y1="200" x2="288" y2="200" marker-end="url(#a)"/>
+  <text class="t m" x="240" y="192" text-anchor="middle">13 verbs · JSON</text>
+
+  <!-- daemon -->
+  <rect class="box" x="290" y="50" width="280" height="350" rx="8"/>
+  <text class="t b" x="430" y="74" text-anchor="middle">Daemon</text>
+  <text class="t m" x="430" y="92" text-anchor="middle">one per repository · loopback TCP</text>
+
+  <rect class="inner" x="300" y="106" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="131" text-anchor="middle">sessions, capabilities, the 13 verbs</text>
+  <rect class="inner" x="300" y="154" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="179" text-anchor="middle">verifier runner · scratch copy</text>
+  <rect class="inner" x="300" y="202" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="227" text-anchor="middle">frontier · semantic merge · standards</text>
+  <rect class="inner" x="300" y="250" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="275" text-anchor="middle">risk monitor · claims · memory</text>
+  <rect class="inner" x="300" y="298" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="323" text-anchor="middle">hooks · channels · deployers</text>
+  <rect class="inner" x="300" y="346" width="260" height="40" rx="4"/>
+  <text class="t" x="430" y="371" text-anchor="middle">git bridge</text>
+
+  <!-- store -->
+  <rect class="box" x="650" y="50" width="280" height="130" rx="6"/>
+  <text class="t b" x="662" y="72">Store</text>
+  <text class="t m" x="708" y="72">redb, outside the tree</text>
+  <text class="t m" x="662" y="98">objects: blobs, trees, units, changes</text>
+  <text class="t m" x="662" y="118">op log: signed and chained ops</text>
+  <text class="t m" x="662" y="138">attestations · standards · memory</text>
+  <text class="t m" x="662" y="158">semantic index, derived and cached</text>
+  <line class="ln" x1="570" y1="115" x2="648" y2="115" marker-end="url(#a)"/>
+  <text class="t m" x="610" y="107" text-anchor="middle">signed ops</text>
+
+  <!-- workspaces -->
+  <rect class="box" x="650" y="200" width="280" height="56" rx="6"/>
+  <text class="t b" x="662" y="222">Workspaces</text>
+  <text class="t m" x="662" y="242">one directory per agent, copy-on-write</text>
+  <line class="ln" x1="570" y1="228" x2="648" y2="228" marker-end="url(#a)"/>
+  <text class="t m" x="610" y="220" text-anchor="middle">materialize</text>
+
+  <!-- git -->
+  <rect class="box" x="650" y="276" width="280" height="56" rx="6"/>
+  <text class="t b" x="662" y="298">git checkout, colocated</text>
+  <text class="t m" x="662" y="318">linear export · first-parent import</text>
+  <line class="ln" x1="572" y1="304" x2="648" y2="304" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="t m" x="610" y="296" text-anchor="middle">export</text>
+  <text class="t m" x="610" y="319" text-anchor="middle">import</text>
+
+  <!-- humans, ci, deployers -->
+  <rect class="box" x="650" y="352" width="280" height="56" rx="6"/>
+  <text class="t b" x="662" y="374">Humans · CI · deployers</text>
+  <text class="t m" x="662" y="394">signed approvals · webhooks · deploys</text>
+  <line class="ln" x1="570" y1="380" x2="648" y2="380" marker-end="url(#a)"/>
+  <text class="t m" x="610" y="372" text-anchor="middle">notify · ask</text>
+</svg>

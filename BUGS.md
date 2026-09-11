@@ -1,22 +1,24 @@
 # Bugs
 
-This is the bug log for Tessra while it is being dogfooded locally. It travels with the code, so a Claude Code session resumed in this repository sees it and works the open entries before anything else.
+Tessra is public, so bugs are filed as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues). This file keeps the template, the workflow a session follows to fix a bug, and the entries logged while the project was dogfooded privately.
 
 ## If you hit a bug
 
-Append an entry under **Open** below. Keep it cheap to write — a title, the command you ran, and what happened is enough. The more of the template you fill in, the faster it gets fixed.
+File an issue. Keep it cheap to write: a title, the command you ran, and what happened is enough. The more of the template you fill in, the faster it gets fixed.
 
-Two ways to log, use whichever is at hand:
+- **In a browser:** [open a bug report](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md). The form is pre-filled with the template below.
+- **From an LLM or agent session** with the `gh` CLI signed in, file it directly. Write the body to a file first so it survives any shell's quoting:
 
-- **Edit this file** directly and save. This is the reliable channel: it shows up in `git` and to the next session.
-- **From a repo under Tessra:** `tessra remember --kind gotcha --body "…" --scope-ref <path>` records it as a memory too. Handy in the moment, but this file is still the canonical handoff.
+  ```sh
+  gh issue create --repo NitrusAphalion/tessra --label bug --title "<short title>" --body-file bug.md
+  ```
 
-Entry template (copy it):
+  If `gh` is not signed in or there is no network, append the entry under **Open** below instead and say so in your handoff, so the next session files it.
+- **Inside a repository under Tessra:** `tessra remember --kind gotcha --body "…" --scope-ref <path>` records it as a memory too. Handy in the moment, but the issue is the canonical record.
+
+Issue body template (copy it; `.github/ISSUE_TEMPLATE/bug_report.md` is the same):
 
 ```
-### <short title>
-- **Status:** open
-- **When:** 2026-09-05
 - **Ran:** `tessra …`   (the exact command, or what you were doing)
 - **Expected:** …
 - **Got:** …   (paste the panic / error / wrong output, trimmed to the useful lines)
@@ -31,10 +33,10 @@ Only **title**, **Ran**, and **Got** are required. Leave the rest blank if you d
 
 A Claude Code session working on Tessra:
 
-1. reads this file first and triages the **Open** entries, most reproducible first;
+1. lists the open issues with `gh issue list --repo NitrusAphalion/tessra`, plus any **Open** entries below, and triages them most reproducible first;
 2. reproduces each in a scratch repo, and writes a failing test wherever one fits;
-3. fixes it, runs `cargo test --workspace`, and moves the entry to **Resolved** with the commit hash;
-4. leaves anything it cannot reproduce **Open**, with a note on what it tried.
+3. fixes it, runs `cargo test --workspace`, and closes the issue by referencing it from the commit message (`Fixes #12`), or moves a file entry to **Resolved** with the commit hash;
+4. leaves anything it cannot reproduce open, with a comment on what it tried.
 
 Known design gaps that are **not** bugs — single machine only, the L0 verifier sandbox, stand-in deployer adapters, and the rest — live in `spec/README.md` under the deviations sections, not here. This file is for defects: crashes, wrong results, and things that surprised you.
 

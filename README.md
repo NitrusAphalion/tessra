@@ -8,12 +8,18 @@ Built for agents that write code around the clock, and for the humans who decide
 </p>
 
 <p align="center">
-<a href="#quick-start">Quick start</a> ·
-<a href="#how-agents-use-it">How agents use it</a> ·
+<strong>Using Tessra</strong>&nbsp;
+<a href="#get-started">Get started</a> ·
+<a href="#why-tessra">Why Tessra</a> ·
+<a href="#how-it-works">How it works</a> ·
 <a href="#what-you-get">What you get</a> ·
+<a href="#how-agents-use-it">How agents use it</a>
+<br>
+<strong>Working on Tessra</strong>&nbsp;
 <a href="#architecture">Architecture</a> ·
 <a href="#status">Status</a> ·
-<a href="#design-documents">Design documents</a>
+<a href="#design-documents">Design documents</a> ·
+<a href="#developing">Developing</a>
 </p>
 
 <p align="center">
@@ -24,6 +30,79 @@ Built for agents that write code around the clock, and for the humans who decide
 </p>
 
 ---
+
+## Get started
+
+Tessra is one binary that sits beside `.git/` in a checkout you already have. There is no server to run, nothing to sign up for, and no Rust toolchain to install.
+
+### 1. Install
+
+macOS and Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.ps1 | iex"
+```
+
+The installer puts `tessra` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows) and adds it to your `PATH`. Open a new terminal and check:
+
+```sh
+tessra --version
+```
+
+Tessra needs `git` on the `PATH`. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
+
+### 2. Initialize a repository
+
+Inside any git checkout:
+
+```sh
+tessra init               # imports HEAD and the last 100 commits as trunk
+tessra status --pretty    # where you are: change, stage, standard, what changed
+```
+
+Add `.tessra/` to your `.gitignore`. Your git history is untouched, and the object store and keys live under your local application data directory, never in the tree.
+
+### 3. Read, and remember what is not in the code
+
+```sh
+tessra context --path src/lib.rs --budget 2000    # what to know before changing a file, in N tokens
+tessra remember --kind gotcha --body "the build needs GOFLAGS=-mod=mod" --scope-kind path --scope-ref backend
+```
+
+### 4. Make a change and land it
+
+Every author works in a workspace of its own and lands through the standard. Run the loop once yourself, as an agent named `bot`:
+
+```sh
+tessra --agent bot workspace --action create                   # prints a workspace id
+tessra --agent bot --workspace <id> edit --path src/x.rs --content "..."
+tessra --agent bot --workspace <id> snapshot --title "handle the empty case" --then verify
+tessra --agent bot --workspace <id> promote --to proposed
+tessra promote --to landed --all              # as the owner: land everything that meets the standard
+tessra export --format git --branch main      # landed revisions become ordinary git commits
+```
+
+`verify` runs your tests in a scratch copy and reports the standard clause by clause. When a clause is unmet, `promote` names it and says what would satisfy it.
+
+### 5. Connect an agent
+
+`tessra mcp` serves the thirteen verbs over stdio as `tessra_status`, `tessra_context`, `tessra_edit`, and so on. For Claude Code, add to `.mcp.json` in the repository:
+
+```json
+{
+  "mcpServers": {
+    "tessra": { "type": "stdio", "command": "tessra", "args": ["--agent", "claude", "mcp"] }
+  }
+}
+```
+
+The session acts as agent `claude`, proposes changes, and you land them. Any MCP client connects the same way. [How agents use it](#how-agents-use-it) describes the loop a session follows.
 
 ## Why Tessra
 
@@ -36,6 +115,28 @@ The bottleneck has moved from writing code to knowing what to trust, why it exis
 - **Files are a view.** The repository is a graph of semantic units, history, intents, and memory. Two agents editing different functions of one file never conflict.
 - **Agents are the interface.** There is no UI. Thirteen verbs over a CLI and MCP, every response in one machine-readable shape, every read within a token budget.
 - **Git stays where it is.** Tessra runs colocated with an existing git checkout and bridges losslessly in both directions, so a project can adopt it without leaving GitHub.
+
+## How it works
+
+Three mechanisms carry most of the design. Each picture shows one of them end to end.
+
+### Nothing lands unproven
+
+<p align="center"><img src="docs/diagrams/pipeline.svg" width="960" alt="A change moves through snapshot, proposed, landed, released, and observed. To land, the daemon runs the verifiers and signs attestations, the standard's clauses must all be met, and an unmet clause is returned to the agent with what would satisfy it."></p>
+
+A snapshot never blocks; it records the workspace as it is. Landing is the gate. The daemon, not the agent, runs the verifiers in a scratch copy with a stripped environment and signs each result as an attestation, cached by content and toolchain. The standard is data: clauses over attestations, structure, judges, and human approval, scoped by path and risk. `promote` either lands the change or answers with the unmet clauses and what would satisfy each, and that answer is what drives an agent's loop.
+
+### Files are a view
+
+<p align="center"><img src="docs/diagrams/semantic-merge.svg" width="960" alt="One file stored as three units. Agent A renames refresh to refresh_token as a recorded operation while agent B edits login to call refresh. Both land, the rename is carried into B's change, and the file is regenerated from the units."></p>
+
+Tree-sitter splits a file into units with identities that survive edits, moves, and renames. Two agents editing different units of one file never conflict, and a rename recorded in one change is applied to a concurrent change that still uses the old name. Files are regenerated from units when a workspace is materialized, and `export --format git` turns each landing into an ordinary commit. Only two edits to the same unit collide, and that becomes a conflict task carrying both intents, not an error.
+
+### Swarms without a merge queue
+
+<p align="center"><img src="docs/diagrams/swarm.svg" width="960" alt="An intent is partitioned into three groups of dependency-connected units, each claimed by one agent with a scoped capability. Agents propose in parallel and the frontier lands every change that meets the standard onto trunk one landing at a time."></p>
+
+`plan` splits an intent into groups of units that share dependency edges and hands each group to an agent as a claim plus a scoped, budgeted capability. Agents propose in parallel. The frontier lands every proposed change that meets the standard, oldest first, and restacks the unlanded ones onto the new trunk. A union that fails verification becomes a conflict task attributed to both changes, and the frontier and every other agent keep moving.
 
 ## What you get
 
@@ -54,72 +155,6 @@ The bottleneck has moved from writing code to knowing what to trust, why it exis
 | **The git bridge** | `export --format git` turns landed trunk revisions into a clean linear history, one commit per landing authored by its agent. `import --branch` lands the commits your teammates made with git. |
 | **State that travels** | A snapshot can carry the toolchain, lockfile hashes, and build state as trees, so checking out an earlier revision runs with no install step. |
 | **Signed by default** | Every principal has a key; every op is signed, chained, and checked against a capability the verifier walks back to the owner. History is tamper-evident. |
-
-## Quick start
-
-### Install
-
-Prebuilt binaries for macOS, Linux, and Windows, on x86_64 and arm64, are attached to every [release](https://github.com/NitrusAphalion/tessra/releases). The installers put `tessra` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows) and add it to your `PATH`. Tessra needs `git` on the `PATH`.
-
-macOS and Linux:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.sh | sh
-```
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/NitrusAphalion/tessra/releases/latest/download/tessra-cli-installer.ps1 | iex"
-```
-
-Every release also carries `.tar.xz` and `.zip` archives per platform, a `sha256.sum` file, and a source tarball.
-
-To build from source instead you need Rust 1.80+ (stable) and git. On Windows, Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need. See [DEVELOPING.md](DEVELOPING.md) for toolchain details.
-
-```sh
-git clone https://github.com/NitrusAphalion/tessra
-cd tessra
-cargo install --path crates/tessra-cli
-```
-
-### First steps
-
-Then, inside any git checkout:
-
-```sh
-tessra init                                 # imports HEAD and the last 100 commits as trunk
-tessra status --pretty                      # where am I: change, stage, standard, what changed
-tessra context --path src/lib.rs --budget 2000
-tessra remember --kind gotcha --body "the build needs GOFLAGS=-mod=mod" --scope-kind path --scope-ref backend
-```
-
-An agent's loop, as an agent named `bot`:
-
-```sh
-tessra --agent bot workspace --action create
-tessra --agent bot --workspace <id> edit --path src/x.rs --content "..."
-tessra --agent bot --workspace <id> snapshot --title "handle the empty case" --then verify
-tessra --agent bot --workspace <id> promote --to proposed
-tessra promote --to landed --all            # the owner lands everything that meets the standard
-tessra export --format git --branch main    # landed revisions become commits
-```
-
-Add `.tessra/` to your `.gitignore`. The object store and keys live under your local application data directory, never in the tree.
-
-### Claude Code and other MCP clients
-
-`tessra mcp` serves the thirteen verbs over stdio as `tessra_status`, `tessra_context`, `tessra_edit`, and so on. For Claude Code, add to `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "tessra": { "type": "stdio", "command": "tessra", "args": ["--agent", "claude", "mcp"] }
-  }
-}
-```
-
-The session acts as agent `claude`, proposes changes, and the owner lands them.
 
 ## How agents use it
 
@@ -153,15 +188,15 @@ Errors carry a `code`, the `unmet` clauses, and a `fix` you can run. Every mutat
 
 The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, in about a thousand tokens.
 
+---
+
+*The rest of this page is for people working on Tessra itself.*
+
 ## Architecture
 
-```
-  CLI / MCP client ──► daemon (loopback, per repository) ──► object store + op log + view
-                          │
-                          ├── workspaces: one directory per agent, materialized in milliseconds
-                          ├── verifiers: run as the daemon, in a scratch copy, output signed
-                          └── hooks, channels, deployers: how the repository acts on the world
-```
+<p align="center"><img src="docs/diagrams/architecture.svg" width="960" alt="An agent session speaks MCP over stdio to the tessra CLI, which sends the thirteen verbs as JSON over loopback to a daemon that runs once per repository. The daemon holds sessions and capabilities, the verifier runner, the frontier, the risk monitor, hooks and channels, and the git bridge, and it writes signed ops to the store, materializes workspaces, bridges to the colocated git checkout, and notifies humans, CI, and deployers."></p>
+
+The CLI is a thin client. An agent session speaks MCP over stdio to `tessra mcp`, and every verb reaches a daemon that runs once per repository over loopback TCP, opens the store once, keeps sessions in memory, and exits when idle. The daemon owns everything that must not be forged: capabilities, the verifier runner, the frontier, hooks and channels, and the git bridge.
 
 | Crate | Holds |
 |---|---|
@@ -193,7 +228,7 @@ What that does and does not mean today:
 - **Platform:** developed and tested on Windows 11. macOS and Linux paths exist and are untested.
 - **Performance budgets** from the spec, such as `status` under 50 ms, a context pack under 500 ms warm, and a verification cache hit under 10 ms, are measured by `tessra bench` and recorded as signed attestations.
 
-The full list of deviations from the spec is in [spec/README.md](spec/README.md). Bugs found while dogfooding are logged in [BUGS.md](BUGS.md).
+The full list of deviations from the spec is in [spec/README.md](spec/README.md). Bugs are tracked as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues); the entries from the private dogfooding period live in [BUGS.md](BUGS.md).
 
 ## Design documents
 
@@ -220,12 +255,17 @@ The specification lives in [spec/](spec/README.md): conventions, the object cata
 
 ## Developing
 
+You need Rust 1.80+ (stable) and git. On Windows, add Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need.
+
 ```sh
+git clone https://github.com/NitrusAphalion/tessra
+cd tessra
 cargo test --workspace
 cargo clippy --workspace --all-targets
+cargo install --path crates/tessra-cli    # installs the tessra binary from this checkout
 ```
 
-[DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, and the daemon. Found a bug? Log it in [BUGS.md](BUGS.md); a session working on this repository triages the open entries first.
+[DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
 
 ## License
 

@@ -1,6 +1,6 @@
 # Developing Tessra
 
-Found a bug while running Tessra? Log it in [BUGS.md](BUGS.md). A Claude Code session working on this repository triages the open entries there before anything else.
+Found a bug while running Tessra? File a [GitHub issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template, a `gh` one-liner for agent sessions, and the workflow a session follows to fix them.
 
 ## Toolchain
 

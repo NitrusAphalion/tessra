@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="One file, auth.py, is stored as three units with stable identities. Agent A renames refresh to refresh_token, recorded as an operation. Agent B concurrently edits login to call refresh. Both land: the merged file has login calling refresh_token, the rename carried into B's change, and the file is regenerated from the units.">
+  <style>
+    .bg{fill:#ffffff}
+    .box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.25}
+    .row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+    .blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.25}
+    .green{fill:#dafbe1;stroke:#4ac26b;stroke-width:1.25}
+    .t{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:13px;fill:#1f2328}
+    .b{font-weight:600}
+    .m{fill:#59636e;font-size:12px}
+    .c{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px;fill:#1f2328}
+    .id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:11px;fill:#59636e}
+    .ok{fill:#1a7f37}
+    .ln{stroke:#59636e;stroke-width:1.5;fill:none}
+    .ln-ok{stroke:#1a7f37}
+    .dash{stroke-dasharray:4 4}
+    .ah{fill:#59636e}
+    .ah-ok{fill:#1a7f37}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d}
+      .row{fill:#0d1117;stroke:#30363d}
+      .blue{fill:#0f1e33;stroke:#1f6feb}
+      .green{fill:#0f2419;stroke:#238636}
+      .t,.c{fill:#e6edf3}
+      .m,.id{fill:#8b949e}
+      .ok{fill:#3fb950}
+      .ln{stroke:#8b949e}
+      .ln-ok{stroke:#3fb950}
+      .ah{fill:#8b949e}
+      .ah-ok{fill:#3fb950}
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah"/></marker>
+    <marker id="a-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah-ok"/></marker>
+  </defs>
+  <rect class="bg" width="960" height="400"/>
+
+  <!-- trunk before -->
+  <rect class="box" x="30" y="120" width="230" height="142" rx="6"/>
+  <text class="c b" x="42" y="142">auth.py</text>
+  <text class="t m" x="104" y="142">on trunk, as three units</text>
+  <rect class="row" x="40" y="158" width="210" height="26" rx="3"/>
+  <text class="c" x="50" y="175">login()</text>
+  <text class="id" x="240" y="175" text-anchor="end">u·3f1a</text>
+  <rect class="row" x="40" y="190" width="210" height="26" rx="3"/>
+  <text class="c" x="50" y="207">refresh()</text>
+  <text class="id" x="240" y="207" text-anchor="end">u·9c02</text>
+  <rect class="row" x="40" y="222" width="210" height="26" rx="3"/>
+  <text class="c" x="50" y="239">logout()</text>
+  <text class="id" x="240" y="239" text-anchor="end">u·77e4</text>
+
+  <!-- agent A -->
+  <rect class="blue" x="340" y="40" width="250" height="110" rx="6"/>
+  <text class="t b" x="352" y="62">Agent A</text>
+  <text class="t m" x="414" y="62">in its workspace</text>
+  <rect class="row" x="350" y="78" width="230" height="26" rx="3"/>
+  <text class="c" x="360" y="95">refresh() → refresh_token()</text>
+  <text class="t m" x="352" y="124">recorded as rename(u·9c02):</text>
+  <text class="t m" x="352" y="140">an operation, not replaced text</text>
+
+  <!-- agent B -->
+  <rect class="blue" x="340" y="250" width="250" height="110" rx="6"/>
+  <text class="t b" x="352" y="272">Agent B</text>
+  <text class="t m" x="414" y="272">in its workspace</text>
+  <rect class="row" x="350" y="288" width="230" height="26" rx="3"/>
+  <text class="c" x="360" y="305">login()  + call refresh()</text>
+  <text class="t m" x="352" y="334">edits unit u·3f1a only,</text>
+  <text class="t m" x="352" y="350">and still names the old function</text>
+
+  <!-- concurrent marker -->
+  <line class="ln dash" x1="465" y1="158" x2="465" y2="192"/>
+  <text class="t m" x="465" y="209" text-anchor="middle">concurrent, uncoordinated</text>
+  <line class="ln dash" x1="465" y1="218" x2="465" y2="242"/>
+
+  <!-- workspaces out of trunk -->
+  <line class="ln" x1="260" y1="165" x2="338" y2="112" marker-end="url(#a)"/>
+  <text class="t m" x="290" y="124" text-anchor="middle">workspace</text>
+  <line class="ln" x1="260" y1="220" x2="338" y2="298" marker-end="url(#a)"/>
+  <text class="t m" x="278" y="272" text-anchor="middle">workspace</text>
+
+  <!-- landings -->
+  <line class="ln ln-ok" x1="590" y1="110" x2="688" y2="150" marker-end="url(#a-ok)"/>
+  <text class="t ok" x="640" y="120" text-anchor="middle">lands</text>
+  <line class="ln ln-ok" x1="590" y1="300" x2="688" y2="232" marker-end="url(#a-ok)"/>
+  <text class="t ok" x="640" y="284" text-anchor="middle">lands</text>
+
+  <!-- trunk after -->
+  <rect class="green" x="690" y="100" width="240" height="160" rx="6"/>
+  <text class="c b" x="702" y="122">auth.py</text>
+  <text class="t m" x="764" y="122">after both land</text>
+  <rect class="row" x="700" y="138" width="220" height="44" rx="3"/>
+  <text class="c" x="710" y="155">login()</text>
+  <text class="id" x="910" y="155" text-anchor="end">u·3f1a</text>
+  <text class="c ok" x="710" y="173">→ refresh_token()</text>
+  <text class="t m" x="910" y="173" text-anchor="end">from A</text>
+  <rect class="row" x="700" y="190" width="220" height="26" rx="3"/>
+  <text class="c" x="710" y="207">refresh_token()</text>
+  <text class="id" x="910" y="207" text-anchor="end">u·9c02</text>
+  <rect class="row" x="700" y="224" width="220" height="26" rx="3"/>
+  <text class="c" x="710" y="241">logout()</text>
+  <text class="id" x="910" y="241" text-anchor="end">u·77e4</text>
+
+  <!-- materialize -->
+  <line class="ln" x1="810" y1="260" x2="810" y2="298" marker-end="url(#a)"/>
+  <text class="t m" x="818" y="284">materialize</text>
+  <rect class="box" x="720" y="300" width="180" height="44" rx="6"/>
+  <text class="c" x="810" y="318" text-anchor="middle">auth.py</text>
+  <text class="t m" x="810" y="334" text-anchor="middle">one file again, regenerated</text>
+  <text class="t m" x="810" y="372" text-anchor="middle">export --format git: one commit per landing</text>
+</svg>

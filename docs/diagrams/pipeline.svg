@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 410" width="960" height="410" role="img" aria-label="A change moves through snapshot, proposed, landed, released, and observed. To land, the daemon runs the verifiers in a scratch copy and signs attestations, the standard's clauses must all be met, and an unmet clause is returned to the agent with what would satisfy it.">
+  <style>
+    .bg{fill:#ffffff}
+    .box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.25}
+    .blue{fill:#ddf4ff;stroke:#54aeff;stroke-width:1.25}
+    .green{fill:#dafbe1;stroke:#4ac26b;stroke-width:1.25}
+    .t{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:13px;fill:#1f2328}
+    .b{font-weight:600}
+    .m{fill:#59636e;font-size:12px}
+    .c{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px;fill:#1f2328}
+    .ok{fill:#1a7f37}
+    .no{fill:#cf222e}
+    .warn{fill:#9a6700}
+    .ln{stroke:#59636e;stroke-width:1.5;fill:none}
+    .ln-ok{stroke:#1a7f37}
+    .ln-warn{stroke:#9a6700;stroke-dasharray:5 4}
+    .ah{fill:#59636e}
+    .ah-ok{fill:#1a7f37}
+    .ah-warn{fill:#9a6700}
+    .gate{fill:none;stroke:#1f2328;stroke-width:1.5}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d}
+      .blue{fill:#0f1e33;stroke:#1f6feb}
+      .green{fill:#0f2419;stroke:#238636}
+      .t,.c{fill:#e6edf3}
+      .m{fill:#8b949e}
+      .ok{fill:#3fb950}
+      .no{fill:#f85149}
+      .warn{fill:#d29922}
+      .ln{stroke:#8b949e}
+      .ln-ok{stroke:#3fb950}
+      .ln-warn{stroke:#d29922}
+      .ah{fill:#8b949e}
+      .ah-ok{fill:#3fb950}
+      .ah-warn{fill:#d29922}
+      .gate{stroke:#e6edf3}
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah"/></marker>
+    <marker id="a-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah-ok"/></marker>
+    <marker id="a-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah-warn"/></marker>
+  </defs>
+  <rect class="bg" width="960" height="410"/>
+
+  <!-- stage ribbon -->
+  <rect class="box" x="40" y="30" width="120" height="30" rx="15"/>
+  <text class="t" x="100" y="49" text-anchor="middle">snapshot</text>
+  <rect class="box" x="235" y="30" width="120" height="30" rx="15"/>
+  <text class="t" x="295" y="49" text-anchor="middle">proposed</text>
+  <rect class="green" x="430" y="30" width="120" height="30" rx="15"/>
+  <text class="t b" x="490" y="49" text-anchor="middle">landed</text>
+  <rect class="box" x="625" y="30" width="120" height="30" rx="15"/>
+  <text class="t" x="685" y="49" text-anchor="middle">released</text>
+  <rect class="box" x="820" y="30" width="120" height="30" rx="15"/>
+  <text class="t" x="880" y="49" text-anchor="middle">observed</text>
+
+  <line class="ln" x1="162" y1="45" x2="233" y2="45" marker-end="url(#a)"/>
+  <text class="t m" x="197" y="22" text-anchor="middle">never blocks</text>
+
+  <line class="ln" x1="357" y1="45" x2="428" y2="45" marker-end="url(#a)"/>
+  <path class="gate" d="M356 16h8v7h-8zM357.5 16v-2.5a2.5 2.5 0 0 1 5 0v2.5"/>
+  <text class="t m" x="370" y="22">standard</text>
+
+  <line class="ln" x1="552" y1="45" x2="623" y2="45" marker-end="url(#a)"/>
+  <path class="gate" d="M530 16h8v7h-8zM531.5 16v-2.5a2.5 2.5 0 0 1 5 0v2.5"/>
+  <text class="t m" x="544" y="22">release standard</text>
+
+  <line class="ln" x1="747" y1="45" x2="818" y2="45" marker-end="url(#a)"/>
+  <text class="t m" x="782" y="22" text-anchor="middle">observers</text>
+
+  <text class="t m" x="480" y="84" text-anchor="middle">Snapshots never block. Each promotion is gated by the standard for that stage. Below: one landing.</text>
+
+  <!-- agent -->
+  <rect class="blue" x="30" y="184" width="120" height="64" rx="6"/>
+  <text class="t b" x="90" y="210" text-anchor="middle">Agent</text>
+  <text class="t m" x="90" y="228" text-anchor="middle">in its own workspace</text>
+
+  <!-- change -->
+  <rect class="box" x="240" y="184" width="140" height="64" rx="6"/>
+  <text class="t b" x="310" y="208" text-anchor="middle">Change</text>
+  <text class="c m" x="310" y="228" text-anchor="middle">snapshot · proposed</text>
+
+  <line class="ln" x1="150" y1="216" x2="238" y2="216" marker-end="url(#a)"/>
+  <text class="t m" x="194" y="208" text-anchor="middle">edit · snapshot</text>
+
+  <!-- verifier runner -->
+  <rect class="box" x="430" y="104" width="210" height="100" rx="6"/>
+  <text class="t b" x="535" y="126" text-anchor="middle">Verifier runner</text>
+  <text class="t m" x="535" y="146" text-anchor="middle">runs as the daemon, not the agent</text>
+  <text class="t m" x="535" y="163" text-anchor="middle">scratch copy · stripped environment</text>
+  <text class="c m" x="535" y="186" text-anchor="middle" font-size="11px">cargo test · pytest · npm test · yours</text>
+
+  <line class="ln" x1="380" y1="204" x2="428" y2="170" marker-end="url(#a)"/>
+  <text class="t m" x="392" y="176" text-anchor="middle">verify</text>
+
+  <!-- attestation -->
+  <rect class="green" x="680" y="104" width="210" height="100" rx="6"/>
+  <text class="t b" x="785" y="126" text-anchor="middle">Attestation</text>
+  <text class="c" x="785" y="146" text-anchor="middle">tests.pass = true</text>
+  <text class="t m" x="785" y="164" text-anchor="middle">signed with the daemon's key</text>
+  <text class="t m" x="785" y="182" text-anchor="middle">cached by content and toolchain</text>
+
+  <line class="ln" x1="640" y1="154" x2="678" y2="154" marker-end="url(#a)"/>
+  <text class="t m" x="659" y="146" text-anchor="middle">signs</text>
+
+  <!-- attestation -> standard -->
+  <polyline class="ln" points="785,204 785,224 600,224 600,242" marker-end="url(#a)"/>
+  <text class="t m" x="692" y="218" text-anchor="middle">satisfies clauses</text>
+
+  <!-- standard -->
+  <rect class="box" x="430" y="244" width="250" height="120" rx="6"/>
+  <text class="t b" x="442" y="266">Standard</text>
+  <text class="t m" x="508" y="266">data, not a script</text>
+  <text class="c ok" x="442" y="290">✓</text>
+  <text class="c" x="460" y="290">attest(tests.pass)</text>
+  <text class="c ok" x="442" y="310">✓</text>
+  <text class="c" x="460" y="310">structural(changed.covered)</text>
+  <text class="c no" x="442" y="330">✗</text>
+  <text class="c" x="460" y="330">approved(human)</text>
+  <text class="t m" x="442" y="352">an agent's own claim carries no weight</text>
+
+  <!-- change -> standard -->
+  <polyline class="ln" points="310,248 310,304 428,304" marker-end="url(#a)"/>
+  <text class="c m" x="424" y="321" text-anchor="end">promote --to landed</text>
+
+  <!-- standard -> trunk -->
+  <rect class="green" x="790" y="268" width="140" height="64" rx="6"/>
+  <text class="t b" x="860" y="292" text-anchor="middle">Trunk</text>
+  <text class="c m" x="860" y="312" text-anchor="middle">landed</text>
+  <line class="ln ln-ok" x1="680" y1="300" x2="788" y2="300" marker-end="url(#a-ok)"/>
+  <text class="t ok" x="735" y="292" text-anchor="middle">every clause met</text>
+
+  <!-- standard -> agent, unmet -->
+  <polyline class="ln ln-warn" points="555,364 555,388 90,388 90,250" marker-end="url(#a-warn)"/>
+  <text class="t warn" x="322" y="382" text-anchor="middle">unmet clause, and what would satisfy it</text>
+</svg>
