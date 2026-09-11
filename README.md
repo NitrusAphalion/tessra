@@ -38,7 +38,7 @@ Built for agents that write code around the clock, and for the humans who decide
 
 ## Get started
 
-Tessra is one binary that sits beside `.git/` in a checkout you already have. There is no server to run, nothing to sign up for, and no Rust toolchain to install.
+Tessra is one binary. It runs on its own, or beside `.git/` in a checkout you already have. There is no server to run, nothing to sign up for, and no Rust toolchain to install.
 
 ### 1. Install
 
@@ -60,18 +60,18 @@ The installer puts `tessra` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Win
 tessra --version
 ```
 
-Tessra needs `git` on the `PATH`. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
+Git is optional. Tessra runs the `git` command only to import an existing checkout at `init` and for the git bridge. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
 
 ### 2. Initialize a repository
 
-Inside any git checkout:
+In any directory, with or without git:
 
 ```sh
-tessra init               # imports HEAD and the last 100 commits as trunk
+tessra init               # in a git checkout, also imports HEAD and the last 100 commits as trunk
 tessra status --pretty    # where you are: change, stage, standard, what changed
 ```
 
-Add `.tessra/` to your `.gitignore`. Your git history is untouched, and the object store and keys live under your local application data directory, never in the tree.
+The object store and keys live under your local application data directory, never in the tree. In a git checkout, add `.tessra/` to your `.gitignore`; your git history is untouched.
 
 ### 3. Read, and remember what is not in the code
 
