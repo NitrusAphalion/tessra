@@ -2977,8 +2977,15 @@ fn land_one(
             .iter()
             .any(|u| u.clause.contains("test.weakened") || u.clause.contains("test.deleted"))
         {
-            let _ =
-                crate::anomaly::record(repo, &rev.author, "landing refused: weakened tests", 2)?;
+            // The author weakened a test once, however many times the frontier
+            // re-evaluates the change; charge the revision, not the pass.
+            let _ = crate::anomaly::record_once(
+                repo,
+                &rev.author,
+                "landing refused: weakened tests",
+                2,
+                &rev_id.to_hex(),
+            )?;
         }
         // Approvals are asked for on the change's own revision, which
         // is what a human sees and what the landing revision cites as prev.
@@ -5320,6 +5327,89 @@ mod tests {
             out["result"]["exceptions"].as_array().map(|a| a.len()),
             Some(1),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn a_refused_landing_charges_the_author_once_per_revision() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "forbid": ["structural(test.weakened)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let with_test = "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one_is_one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n";
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": with_test }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // An agent loosens the test and proposes it.
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "create" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        bot.workspace = repo
+            .workspaces
+            .iter()
+            .find(|w| w.principal == bot.principal())
+            .map(|w| w.id);
+        assert!(bot.workspace.is_some(), "{out}");
+        let edited =
+            with_test.replace("assert_eq!(super::one(), 1);", "assert!(super::one() > 0);");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": edited }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "snapshot",
+            &json!({ "title": "loosen the test" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut bot, "promote", &json!({ "to": "proposed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The frontier refuses it as often as the owner asks; the author pays once.
+        for _ in 0..3 {
+            let out = call(
+                &mut repo,
+                &mut owner,
+                "promote",
+                &json!({ "to": "landed", "all": true }),
+            );
+            assert_eq!(out["ok"], json!(true), "{out}");
+            assert_eq!(out["result"]["landed"], json!(0), "{out}");
+        }
+        let agent = repo
+            .session_agent(&bot.principal())
+            .expect("bot is a session");
+        assert_eq!(crate::anomaly::state_for(&repo, &agent).score, 2);
+        let out = call(&mut repo, &mut bot, "status", &json!({}));
+        assert_eq!(
+            out["ok"],
+            json!(true),
+            "the author must not be revoked: {out}"
         );
     }
 

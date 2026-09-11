@@ -24,6 +24,9 @@ pub struct AnomalyState {
     pub throttled_until: i64,
     #[serde(default)]
     pub throttles: u32,
+    /// Keys already charged through `record_once`, so one cause counts once.
+    #[serde(default)]
+    pub charged: Vec<String>,
 }
 
 fn path(repo: &Repo, agent: &EntityId) -> PathBuf {
@@ -80,6 +83,31 @@ pub fn check(repo: &Repo, principal: &EntityId) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Record an anomaly at most once per `key`, for a signal the same cause
+/// raises again and again: a landing refused for a weakened test is the
+/// author's doing once, however many times the frontier re-evaluates it.
+pub fn record_once(
+    repo: &mut Repo,
+    principal: &EntityId,
+    what: &str,
+    points: u32,
+    key: &str,
+) -> Result<Option<Json>> {
+    let Some(agent) = repo.session_agent(principal) else {
+        return Ok(None);
+    };
+    let mut s = load(repo, &agent);
+    if s.charged.iter().any(|k| k == key) {
+        return Ok(None);
+    }
+    s.charged.push(key.to_string());
+    if s.charged.len() > 200 {
+        s.charged.remove(0);
+    }
+    save(repo, &agent, &s)?;
+    record(repo, principal, what, points)
 }
 
 /// Record an anomaly for the agent behind a principal. Returns what
