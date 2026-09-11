@@ -5177,6 +5177,43 @@ mod tests {
     }
 
     #[test]
+    fn risk_sensitive_accepts_the_text_that_config_set_stores() {
+        let (_dir, mut repo, mut actor) = scratch();
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "config",
+            &json!({ "set": ["risk_sensitive=vault/**,infra/**"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "vault/policy.toml", "content": "ttl = 30\n" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "policy" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut actor, "verify", &json!({}));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let factors = out["result"]["risk"]["factors"]
+            .as_array()
+            .expect("risk factors");
+        assert!(
+            factors
+                .iter()
+                .any(|f| f["name"] == json!("sensitive_scope")),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn snapshot_then_verify_runs_the_verifiers() {
         let (_dir, mut repo, mut actor) = scratch();
         // A verifier that passes wherever the tests can run at all.

@@ -224,6 +224,12 @@ pub fn assess(repo: &Repo, rev_id: &ObjectId, rev: &Revision) -> Result<Risk> {
             .iter()
             .filter_map(|v| v.as_text().map(str::to_string))
             .collect(),
+        // `config --set` stores text, so the CLI form is a comma-separated list.
+        Some(Cbor::Text(t)) => t
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect(),
         _ => DEFAULT_SENSITIVE.iter().map(|s| s.to_string()).collect(),
     };
     let sensitive: Vec<&String> = paths
