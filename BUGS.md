@@ -1,44 +1,8 @@
-# Bugs
+# Bugs (archive)
 
-Tessra is public, so bugs are filed as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues). This file keeps the template, the workflow a session follows to fix a bug, and the entries logged while the project was dogfooded privately.
+Bugs are tracked as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues); report one with the [bug report template](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md), and [CONTRIBUTING.md](CONTRIBUTING.md) has the workflow a session follows to fix one. This file is frozen: it holds the entries logged before bugs moved to the issue tracker, and it is not updated.
 
-## If you hit a bug
-
-File an issue. Keep it cheap to write: a title, the command you ran, and what happened is enough. The more of the template you fill in, the faster it gets fixed.
-
-- **In a browser:** [open a bug report](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md). The form is pre-filled with the template below.
-- **From an LLM or agent session** with the `gh` CLI signed in, file it directly. Write the body to a file first so it survives any shell's quoting:
-
-  ```sh
-  gh issue create --repo NitrusAphalion/tessra --label bug --title "<short title>" --body-file bug.md
-  ```
-
-  If `gh` is not signed in or there is no network, append the entry under **Open** below instead and say so in your handoff, so the next session files it.
-- **Inside a repository under Tessra:** `tessra remember --kind gotcha --body "…" --scope-ref <path>` records it as a memory too. Handy in the moment, but the issue is the canonical record.
-
-Issue body template (copy it; `.github/ISSUE_TEMPLATE/bug_report.md` is the same):
-
-```
-- **Ran:** `tessra …`   (the exact command, or what you were doing)
-- **Expected:** …
-- **Got:** …   (paste the panic / error / wrong output, trimmed to the useful lines)
-- **Repro:** the smallest steps that trigger it, if known
-- **Where:** milestone / crate / file, if you can guess (e.g. M4 · tessra-daemon · swarm.rs)
-- **Env:** OS, debug or release, and `tessra --version`
-```
-
-Only **title**, **Ran**, and **Got** are required. Leave the rest blank if you don't know.
-
-## How these get fixed
-
-A Claude Code session working on Tessra:
-
-1. lists the open issues with `gh issue list --repo NitrusAphalion/tessra`, plus any **Open** entries below, and triages them most reproducible first;
-2. reproduces each in a scratch repo, and writes a failing test wherever one fits;
-3. fixes it, runs `cargo test --workspace`, and closes the issue by referencing it from the commit message (`Fixes #12`), or moves a file entry to **Resolved** with the commit hash;
-4. leaves anything it cannot reproduce open, with a comment on what it tried.
-
-Known design gaps that are **not** bugs — single machine only, the L0 verifier sandbox, stand-in deployer adapters, and the rest — live in `spec/README.md` under the deviations sections, not here. This file is for defects: crashes, wrong results, and things that surprised you.
+Known design gaps that are **not** bugs (single machine only, the L0 verifier sandbox, stand-in deployer adapters, and the rest) live in `spec/README.md` under the deviations sections.
 
 *Entries below cite commit hashes such as `42a26fb` and `7440272` from the project's history
 before it was open-sourced as Tessra. Those commits are not part of this repository.*

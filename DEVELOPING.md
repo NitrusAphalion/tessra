@@ -1,6 +1,6 @@
 # Developing Tessra
 
-Found a bug while running Tessra? File a [GitHub issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template, a `gh` one-liner for agent sessions, and the workflow a session follows to fix them.
+Found a bug while running Tessra? File a [GitHub issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [CONTRIBUTING.md](CONTRIBUTING.md) has the `gh` one-liner for agent sessions and the workflow a session follows to fix one.
 
 ## Toolchain
 

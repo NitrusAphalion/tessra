@@ -4,7 +4,20 @@ Thanks for looking. Tessra is pre-release and moving quickly, so a short convers
 
 ## Bugs
 
-File a [bug report](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md). Only the title, the command you ran, and what happened are required. [BUGS.md](BUGS.md) has the template, a `gh` one-liner for agent sessions, and the workflow a session follows to fix a bug.
+File a [bug report](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md). Only the title, the command you ran, and what happened are required. An agent session with the `gh` CLI signed in files it directly; write the body to a file first so it survives any shell's quoting:
+
+```sh
+gh issue create --repo NitrusAphalion/tessra --label bug --title "<short title>" --body-file bug.md
+```
+
+Inside a repository under Tessra, `tessra remember --kind gotcha --body "…" --scope-ref <path>` records it as a memory too, but the issue is the record. `BUGS.md` is a frozen archive from before the project had an issue tracker; nothing goes there.
+
+A session working a bug:
+
+1. lists what is open with `gh issue list --repo NitrusAphalion/tessra --label bug` and triages, most reproducible first;
+2. reproduces it in a scratch repository, and writes a failing test wherever one fits;
+3. fixes it through the Tessra loop, so `verify` runs the suite, and puts `Fixes #N` in the change's title, which becomes the commit that closes the issue;
+4. comments on anything it cannot reproduce with what it tried, and leaves it open.
 
 ## Changes
 

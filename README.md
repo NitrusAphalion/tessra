@@ -225,7 +225,7 @@ Every response has the same shape, so an agent reads state instead of inferring 
 
 Errors carry a `code`, the `unmet` clauses, and a `fix` you can run. Every mutation takes an idempotency key, so a retry never happens twice, and `undo` takes back your own recent operations.
 
-The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, in about a thousand tokens.
+The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](docs/VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, in about a thousand tokens.
 
 ## Standards and hooks
 
@@ -331,7 +331,7 @@ Events are `snapshot`, `proposed`, `landed`, `conflict.opened`, `released`, `dep
 | `notify(channel=<name>, text=<text>)` | Delivers a message to a channel |
 | `agent(<name>, intent=<text>, budget=<ops>)` | Starts an agent through the runner set with `tessra config --set agent_runner=<command>`, scoped to the event's paths |
 
-Actions run with the hook's principal and nothing more. Every run is an op with its triggering event and outcome, so "why did this fire" and "why did it not" are queries. [PIPELINE.md](PIPELINE.md) and [HOOKS.md](HOOKS.md) argue the design; [DEVELOPING.md](DEVELOPING.md) has every option.
+Actions run with the hook's principal and nothing more. Every run is an op with its triggering event and outcome, so "why did this fire" and "why did it not" are queries. [PIPELINE.md](docs/PIPELINE.md) and [HOOKS.md](docs/HOOKS.md) argue the design; [DEVELOPING.md](DEVELOPING.md) has every option.
 
 ## Reading the repository
 
@@ -466,7 +466,7 @@ The CLI is a thin client. An agent session speaks MCP over stdio to `tessra mcp`
 | `tessra-daemon` | Repository layout, workspaces, principals and sessions, the verbs, verifiers, hooks, risk, swarm, delivery, the git bridge, the loopback server |
 | `tessra-cli` | The `tessra` command and the MCP server |
 
-A few decisions that shape everything else, argued in [VISION.md](VISION.md) and settled in [spec/](spec/README.md):
+A few decisions that shape everything else, argued in [VISION.md](docs/VISION.md) and settled in [spec/](spec/README.md):
 
 - **Snapshots with stable change IDs**, not patch theory. Semantic merge is layered above.
 - **An operation log** of signed, chained effects; every replica re-evaluates a landing's standard against the attestations it cites, so the hub can be untrusted storage.
@@ -476,7 +476,7 @@ A few decisions that shape everything else, argued in [VISION.md](VISION.md) and
 
 ## Status
 
-Tessra is pre-release and under active development. Every milestone on the [roadmap](ROADMAP.md), M0 through M8, has a passing end-to-end demo: substrate, semantic merge, standards and verification, swarms, the agent surface, production, the git bridge, and state bundles. The repository is developed under Tessra, and it is being dogfooded on a real product monorepo.
+Tessra is pre-release and under active development. Every milestone on the [roadmap](docs/ROADMAP.md), M0 through M8, has a passing end-to-end demo: substrate, semantic merge, standards and verification, swarms, the agent surface, production, the git bridge, and state bundles. The repository is developed under Tessra, and it is being dogfooded on a real product monorepo.
 
 What that does and does not mean today:
 
@@ -487,28 +487,28 @@ What that does and does not mean today:
 - **Platform:** developed and tested on Windows 11. macOS and Linux paths exist and are untested.
 - **Performance budgets** from the spec, such as `status` under 50 ms, a context pack under 500 ms warm, and a verification cache hit under 10 ms, are measured by `tessra bench` and recorded as signed attestations.
 
-The full list of deviations from the spec is in [spec/README.md](spec/README.md). Bugs are tracked as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues); the entries from the private dogfooding period live in [BUGS.md](BUGS.md).
+The full list of deviations from the spec is in [spec/README.md](spec/README.md). Bugs are tracked as [GitHub issues](https://github.com/NitrusAphalion/tessra/issues).
 
 ## Design documents
 
-Start with [VISION.md](VISION.md). The rest are companions it links to.
+Start with [VISION.md](docs/VISION.md). The rest are companions it links to.
 
 | Document | What it covers |
 |---|---|
-| [VISION.md](VISION.md) | Thesis, principles, the thirteen bets, architecture, decisions |
-| [TENETS.md](TENETS.md) | Constraints derived from how models work. The tiebreaker when scope is argued |
-| [ADOPTION.md](ADOPTION.md) | Why git won and how Tessra wins |
-| [ROADMAP.md](ROADMAP.md) | Milestones M0 through M8, each defined by a demo |
-| [MEMORY.md](MEMORY.md) | Memory as typed objects in the graph. Agents record and recall through the VCS |
-| [PARALLELISM.md](PARALLELISM.md) | Many agents in one repository and one file, without a merge queue |
-| [PIPELINE.md](PIPELINE.md) | Standards, verifiers, stages, and review by exception |
-| [TESTING.md](TESTING.md) | Tests as nodes, coverage as a node-level relation, tests as proof |
-| [LIFECYCLE.md](LIFECYCLE.md) | No screens, agents as the interface, channels, intent to production |
-| [HOOKS.md](HOOKS.md) | Subscriptions to the operation log with actions, including agents |
-| [RISK.md](RISK.md) | The continuous risk monitor and what it drives |
-| [SECURITY.md](SECURITY.md) | Threat model, keys, signed ops, capabilities, verifier isolation |
-| [VERBS.md](VERBS.md) | The thirteen agent verbs, the response shape, and the manual |
-| [GAPS.md](GAPS.md) | The sweep against git and competing systems: what was decided and what remains open, with a draft glossary |
+| [VISION.md](docs/VISION.md) | Thesis, principles, the thirteen bets, architecture, decisions |
+| [TENETS.md](docs/TENETS.md) | Constraints derived from how models work. The tiebreaker when scope is argued |
+| [ADOPTION.md](docs/ADOPTION.md) | Why git won and how Tessra wins |
+| [ROADMAP.md](docs/ROADMAP.md) | Milestones M0 through M8, each defined by a demo |
+| [MEMORY.md](docs/MEMORY.md) | Memory as typed objects in the graph. Agents record and recall through the VCS |
+| [PARALLELISM.md](docs/PARALLELISM.md) | Many agents in one repository and one file, without a merge queue |
+| [PIPELINE.md](docs/PIPELINE.md) | Standards, verifiers, stages, and review by exception |
+| [TESTING.md](docs/TESTING.md) | Tests as nodes, coverage as a node-level relation, tests as proof |
+| [LIFECYCLE.md](docs/LIFECYCLE.md) | No screens, agents as the interface, channels, intent to production |
+| [HOOKS.md](docs/HOOKS.md) | Subscriptions to the operation log with actions, including agents |
+| [RISK.md](docs/RISK.md) | The continuous risk monitor and what it drives |
+| [SECURITY.md](docs/SECURITY.md) | Threat model, keys, signed ops, capabilities, verifier isolation |
+| [VERBS.md](docs/VERBS.md) | The thirteen agent verbs, the response shape, and the manual |
+| [GAPS.md](docs/GAPS.md) | The sweep against git and competing systems: what was decided and what remains open, with a draft glossary |
 
 The specification lives in [spec/](spec/README.md): conventions, the object catalog, operations and sync, security, on-disk layout, and the agent manual. When a design document and the spec disagree, the spec wins and the design document gets fixed.
 
@@ -524,7 +524,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/tessra-cli    # installs the tessra binary from this checkout
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the pull request rules, and [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, how the repository is developed under Tessra itself, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [BUGS.md](BUGS.md) has the template and the workflow a session follows to fix it.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the pull request rules, and [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb with examples, the daemon, how the repository is developed under Tessra itself, and how a release is cut. Found a bug? [File an issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md); [CONTRIBUTING.md](CONTRIBUTING.md) has the workflow a session follows to fix it.
 
 ## License
 
