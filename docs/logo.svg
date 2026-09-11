@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 120" width="372" height="120" role="img" aria-label="Tessra">
+  <style>
+    .w{font-family:"Inter","Segoe UI",-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;font-size:66px;font-weight:700;letter-spacing:-2px;fill:#1f2328}
+    @media (prefers-color-scheme: dark){.w{fill:#e6edf3}}
+  </style>
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="96" y2="96">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(12,12)">
+    <rect x="0" y="0" width="96" height="28" rx="7" fill="url(#g)"/>
+    <rect x="34" y="34" width="28" height="62" rx="7" fill="url(#g)"/>
+    <rect x="0" y="34" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+    <rect x="0" y="68" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+    <rect x="68" y="34" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+    <rect x="68" y="68" width="28" height="28" rx="7" fill="#2ea043"/>
+  </g>
+  <text class="w" x="130" y="86">tessra</text>
+</svg>

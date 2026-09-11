@@ -1,4 +1,4 @@
-<h1 align="center">Tessra</h1>
+<h1 align="center"><img src="docs/logo.svg" alt="Tessra" height="88"></h1>
 
 <p align="center"><strong>The version control system for the era of AI.</strong></p>
 
@@ -13,7 +13,8 @@ Built for agents that write code around the clock, and for the humans who decide
 <a href="#why-tessra">Why Tessra</a> ·
 <a href="#how-it-works">How it works</a> ·
 <a href="#what-you-get">What you get</a> ·
-<a href="#how-agents-use-it">How agents use it</a>
+<a href="#how-agents-use-it">How agents use it</a> ·
+<a href="#standards-and-hooks">Standards and hooks</a>
 <br>
 <strong>Working on Tessra</strong>&nbsp;
 <a href="#architecture">Architecture</a> ·
@@ -187,6 +188,81 @@ Every response has the same shape, so an agent reads state instead of inferring 
 Errors carry a `code`, the `unmet` clauses, and a `fix` you can run. Every mutation takes an idempotency key, so a retry never happens twice, and `undo` takes back your own recent operations.
 
 The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, in about a thousand tokens.
+
+## Standards and hooks
+
+Standards gate; hooks react. A standard says what must be true before a change lands. A hook says what happens when something does. Both are data in the repository: the owner edits them, every agent can read them, and every evaluation and every hook run is an op you can query.
+
+### Writing a standard
+
+`tessra standard` shows the trunk standard. After `init` it holds one clause, `require structural(flags.none)`. The owner adds clauses with `--require` and `--forbid`, drops one with `--remove` by its text or index, and gates clauses by risk with `--when`:
+
+```sh
+tessra standard --require 'attest(tests.pass)'                            # the daemon's own test run passes
+tessra standard --require 'attest(tests.fail_on_parent, for=new_tests)'   # new tests fail without the change
+tessra standard --require 'structural(changed.covered)'                   # every changed unit has a covering test
+tessra standard --forbid  'structural(test.weakened)'                     # no assertion removed, no test skipped
+tessra standard --when high --require 'approved(human, keysigned=true)'   # a person signs off at high risk and above
+tessra standard                                                           # show it, clause by clause
+```
+
+`--when` applies to every clause added in the same command, so keep risk-gated clauses in an invocation of their own. A clause is `kind(name, key=value)`; `all(...)`, `any(...)`, and `not(...)` nest, and `unless` adds an escape hatch.
+
+| Clause | Satisfied by |
+|---|---|
+| `attest(<kind>)` | An attestation of that kind signed by the daemon's verifier runner or by a principal you granted. `tests.pass` comes from `verify`; `for=new_tests` limits `tests.fail_on_parent` to tests the change added. |
+| `structural(<check>)` | The change itself: `flags.none`, `intent.linked`, `changed.covered`, `test.modified`, `test.deleted`, `test.weakened`, `test.skipped`. |
+| `approved(human, keysigned=true)` | An approval from a human principal, answered through a channel. With `keysigned`, only a reply signed with the key the daemon holds for that person counts. |
+| `judge(<rubric>, judges=2, distinct_models=true, min_confidence=700)` | Agreeing attestations from judge sessions run by agents other than the author. Append `unless approved(human)` to let a person settle a split verdict. |
+| `observe(<signal>, max=50)` | For a target's release standard, edited with `--target prod`: an observer signal within bounds. |
+
+An agent's own `attest` is stored but never satisfies a clause. When `verify` or `promote` finds a clause unmet, the response names the clause and the command that would satisfy it.
+
+### Bringing in your CI
+
+An external system becomes a verifier by attesting under a principal you grant it. The standard then consumes its attestations like any other:
+
+```sh
+tessra grant --external ci                                                       # a principal that may only attest
+tessra hook --name notify-ci --on proposed --do 'webhook(https://ci.example.com/run)'
+tessra standard --require 'attest(ci.pass)'
+```
+
+The hook posts the event as JSON with a daemon signature in the `X-Tessra-Signature` header. When the run finishes, CI calls back:
+
+```sh
+tessra --as ci attest --kind ci.pass --subject <snapshot> --result true
+```
+
+### Writing a hook
+
+A hook is an event, an optional filter, and one or more actions. It never blocks a promotion: anything that must block is a clause in the standard, and a hook can only affect one indirectly, by producing an attestation the standard consumes.
+
+```sh
+tessra hook --name notify-ci --on proposed        --where 'scope(src/**)' --do 'webhook(http://ci.local/run)'
+tessra hook --name auto-land --on proposed        --do 'land()'                       # a continuous frontier
+tessra hook --name triage    --on conflict.opened --do 'task(look at this)'
+tessra hook --name page      --on observed.fail   --do 'notify(channel=oncall, text=canary tripped)'
+tessra hook --name fix-it    --on 'conflict.*'    --do 'agent(resolver, intent=resolve this conflict, budget=20000)'
+tessra hook --name ci-script --on landed --where 'all(scope(src/**), not(author(bot)))' --do 'run(./ci.sh)'
+tessra hook                                                                            # list them
+tessra hook --name notify-ci --disable                                                 # and --enable
+```
+
+Events are `snapshot`, `proposed`, `landed`, `conflict.opened`, `released`, `deployed`, `observed`, `observed.fail`, `target.rolled_back`, `anomaly.detected`, `anomaly.revoked`, or a family such as `conflict.*`. Filters are `scope(<glob>)`, `author(<prefix>)`, `title(<text>)`, and `event(<pattern>)`, combined with `all`, `any`, and `not`.
+
+| Action | Does |
+|---|---|
+| `webhook(<url>)` | POSTs the event as JSON, signed in `X-Tessra-Signature` |
+| `run(<command>)` | Runs a command with the event on stdin |
+| `verify()` | Runs the verifiers on the change now |
+| `attest(<kind>)` | Records an attestation under the hook's principal |
+| `land()` | Lands the change if the standard holds |
+| `task(<text>)`, `remember(<text>)` | Opens a task, or records a memory, attached to the event |
+| `notify(channel=<name>, text=<text>)` | Delivers a message to a channel |
+| `agent(<name>, intent=<text>, budget=<ops>)` | Starts an agent through the runner set with `tessra config --set agent_runner=<command>`, scoped to the event's paths |
+
+Actions run with the hook's principal and nothing more. Every run is an op with its triggering event and outcome, so "why did this fire" and "why did it not" are queries. [PIPELINE.md](PIPELINE.md) and [HOOKS.md](HOOKS.md) argue the design; [DEVELOPING.md](DEVELOPING.md) has every option.
 
 ---
 

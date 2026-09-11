@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Tessra mark: a letter T made of mosaic tiles, with one tile landed in green">
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="16" y1="16" x2="112" y2="112">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="28" rx="7" fill="url(#g)"/>
+  <rect x="50" y="50" width="28" height="62" rx="7" fill="url(#g)"/>
+  <rect x="16" y="50" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+  <rect x="16" y="84" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+  <rect x="84" y="50" width="28" height="28" rx="7" fill="url(#g)" opacity="0.3"/>
+  <rect x="84" y="84" width="28" height="28" rx="7" fill="#2ea043"/>
+</svg>
