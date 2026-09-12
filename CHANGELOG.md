@@ -13,11 +13,21 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 ### Changed
 
 - The declared minimum Rust is 1.90, which the locked dependencies (tree-sitter 0.27) need; the README said 1.80, which could not build the workspace.
-
+- `status` lists what happened since the cursor newest first, cut to half its budget, each entry saying what the op did (the change's title, the memory's kind and body, the landing's number) and who did it by name; `since_omitted` counts the rest and `cursor` is what to pass next time. It used to return every op since init, each as hashes.
+- `budget.used` is what the verb produced against its budget, and a new `budget.total` is the whole answer including the state echo, so the cost of a call is never hidden.
+- Every query kind is cut to its budget and says what it left out: `revision`, `since`, `exceptions`, `trusted`, `workspace --action list`, and the uncovered list of `tests`; `blame` and `tests` charge entries by their real size.
+- Over MCP, the `next` suggestions are tool calls (`tessra_verify {"stage":"landed"}`) instead of CLI text, every tool's schema carries descriptions, enumerations, and required fields, `tessra_status` takes a budget, and the server's instructions are the agent manual.
+- The CLI's `status` takes `--budget`, and `query --help` names every kind.
 - Reaching the daemon no longer makes a process the owner or a human. `init` issues an owner credential, printed once and kept in the keys directory as `owner.credential` until you move it (the daemon stores only its hash), and the owner's policy verbs (`standard`, `hook`, `channel`, `target`, `grant`, `revoke`, `config --set`, `attest`, `revert`, `undo`) ask for it through `--credential`, `TESSRA_CREDENTIAL`, or a prompt at a terminal. `grant --human` and `grant --external` print a credential for the principal, and `--as <name>` needs it. A repository from an earlier release gets an owner credential on its next open; a human or external granted earlier is reissued one by being granted again. An agent session that can run `tessra` in the checkout can therefore no longer loosen the standard, attest as the owner, or approve its own work.
 
 ### Fixed
 
+- `context --path` no longer needs a workspace: without one it describes trunk, as `--unit` already did, reading the file or directory from the revision's tree.
+- A refused promotion carries `unmet` as a list of clauses, each with its reason and a `fix`, the `stage` refused, and `fix: "verify"`, as VERBS.md describes; the clause list is no longer text inside `message` alone.
+- A `snapshot` or `remember` retried with the same idempotency key reports the revision or memory the first call recorded (`retried: true` on a snapshot) and points the workspace at it, instead of naming a revision that was never recorded.
+- A session's workspace is kept beside its key, so a daemon that restarted, or a command that is its own daemon, finds the session's own workspace instead of the principal's first one.
+- `snapshot --then promote landed` (or `--then land`) lands as the coordinator, as VERBS.md promised; `--then promote` still proposes.
+- The workspace path in the state echo and in `workspace --action list` no longer carries the Windows verbatim prefix.
 - An approval, a judge's verdict, or an external attestation on a revision no longer counts for a later revision of the same change that the author re-snapshotted with different content. It carries only to the revisions the system derives from the attested one: its landing, its restack, and a conflict merge, whose second parent names it.
 - A restacked revision keeps the change's author instead of naming the daemon, so blame and provenance after a restack still point at who wrote the change.
 

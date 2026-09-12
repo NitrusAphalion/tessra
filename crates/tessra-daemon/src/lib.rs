@@ -49,6 +49,13 @@ pub enum Error {
     AlreadyInit(PathBuf),
     #[error("{code}: {message}")]
     Verb { code: &'static str, message: String },
+    /// A promotion the standard refused: every unmet clause with its reason.
+    #[error("{message}")]
+    StandardUnmet {
+        stage: String,
+        clauses: Vec<(String, String)>,
+        message: String,
+    },
     #[error("git: {0}")]
     Git(String),
 }
@@ -60,9 +67,24 @@ impl Error {
             message: message.into(),
         }
     }
+    /// The standard is unmet for a stage: the clauses and what each needs.
+    pub fn unmet(stage: &str, clauses: Vec<(String, String)>) -> Self {
+        let list: Vec<String> = clauses.iter().map(|(c, r)| format!("{c}: {r}")).collect();
+        Error::StandardUnmet {
+            stage: stage.to_string(),
+            message: format!(
+                "{} clause{} unmet for stage {stage}: {}",
+                clauses.len(),
+                if clauses.len() == 1 { "" } else { "s" },
+                list.join("; ")
+            ),
+            clauses,
+        }
+    }
     pub fn code(&self) -> &'static str {
         match self {
             Error::Verb { code, .. } => code,
+            Error::StandardUnmet { .. } => "STANDARD_UNMET",
             Error::OpLog(tessra_oplog::Error::Rejected { .. }) => "REJECTED",
             Error::NotARepo(_) => "NOT_A_REPO",
             Error::AlreadyInit(_) => "ALREADY_INIT",

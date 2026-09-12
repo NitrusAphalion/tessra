@@ -42,7 +42,7 @@ Outside the set because they are rare and gated by capability: init, grant, revo
 }
 ```
 
-`state` is the state echo: what is true now, so the agent never has to remember or infer it. `next` is one or two suggested calls, which is in-context learning at no cost. Errors carry a code, the unmet clauses if any, and a corrected call:
+`state` is the state echo: what is true now, so the agent never has to remember or infer it. `next` is one or two suggested calls, which is in-context learning at no cost; over MCP they are tool calls. `budget.used` is what the verb produced against the budget it was given, and `budget.total` is the whole response with the state echo, so the cost of a call is never hidden. Errors carry a code, the unmet clauses if any, and a corrected call:
 
 ```
 {

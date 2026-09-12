@@ -101,20 +101,34 @@ fn call_inner(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json, limit
     let state = state(repo, actor).unwrap_or_else(|e| json!({ "error": e.to_string() }));
     match outcome {
         Ok(Outcome { result, next }) => {
-            let used = (serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0) / 4) as u64;
-            json!({
+            // `used` is what the verb produced against the budget it was
+            // given; `total` is the whole answer, with the state echo and
+            // the suggestions every response carries.
+            let used = (json_len(&result) / 4) as u64;
+            let mut envelope = json!({
                 "ok": true,
                 "result": result,
                 "state": state,
                 "next": next,
-                "budget": { "used": used, "limit": limit }
-            })
+                "budget": { "used": used, "limit": limit, "total": 0 }
+            });
+            envelope["budget"]["total"] = json!((json_len(&envelope) / 4) as u64);
+            envelope
         }
         Err(e) => {
             let (code, message, fix, unmet) = match &e {
                 Error::Verb { code, message } => {
                     (*code, message.clone(), fix_for(code), Json::Null)
                 }
+                Error::StandardUnmet { clauses, .. } => (
+                    "STANDARD_UNMET",
+                    e.to_string(),
+                    Some("verify".to_string()),
+                    json!(clauses
+                        .iter()
+                        .map(|(c, r)| json!({ "clause": c, "reason": r, "fix": fix_for_clause(c, r) }))
+                        .collect::<Vec<_>>()),
+                ),
                 Error::OpLog(tessra_oplog::Error::Rejected { step, name, reason }) => (
                     "REJECTED",
                     format!("step {step} ({name}): {reason}"),
@@ -132,6 +146,9 @@ fn call_inner(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json, limit
                 "message": message,
                 "state": state,
             });
+            if let Error::StandardUnmet { stage, .. } = &e {
+                err["stage"] = json!(stage);
+            }
             if let Some(f) = fix {
                 err["fix"] = json!(f);
             }
@@ -147,9 +164,44 @@ fn fix_for(code: &str) -> Option<String> {
     match code {
         "NO_WORKSPACE" => Some("workspace --action create".into()),
         "STANDARD_UNMET" => Some("verify".into()),
+        "CREDENTIAL_REQUIRED" => Some("the same call with --credential".into()),
         "NOT_YET" => None,
         _ => None,
     }
+}
+
+/// What satisfies one unmet clause: the command its reason names when it
+/// names one, a verify for an attestation the daemon can produce itself,
+/// the exception queue for a judge's verdict, and otherwise the reason.
+fn fix_for_clause(clause: &str, reason: &str) -> String {
+    if let Some(i) = reason.find("tessra ") {
+        return reason[i..].trim_end_matches('.').to_string();
+    }
+    if clause.contains("attest(") {
+        return "verify".into();
+    }
+    if clause.contains("judge(") {
+        return "query --kind exceptions".into();
+    }
+    reason.to_string()
+}
+
+/// Cut a list to a character budget, dropping from the end: how many were
+/// dropped.
+fn cut_list(list: &mut Vec<Json>, chars: usize) -> usize {
+    let total = list.len();
+    let mut used = 0usize;
+    let mut keep = 0usize;
+    for j in list.iter() {
+        let cost = json_len(j) + 1;
+        if used + cost > chars {
+            break;
+        }
+        used += cost;
+        keep += 1;
+    }
+    list.truncate(keep);
+    total - keep
 }
 
 /// Acting as the owner takes the owner credential besides the daemon
@@ -407,7 +459,7 @@ pub fn state(repo: &Repo, actor: &Actor) -> Result<Json> {
         let (snap_id, _) = root_snapshot(repo, &rev)?;
         let (met, unmet, _) = standard_status(repo, &rev_id, &rev)?;
         s["workspace"] = json!(ws.id.to_letters());
-        s["path"] = json!(ws_path(&ws).display().to_string());
+        s["path"] = json!(display_path(&ws_path(&ws)));
         s["snapshot"] = json!(snap_id.to_hex());
         s["revision"] = json!(rev_id.to_hex());
         s["change"] = json!(rev.id.to_letters());
@@ -559,7 +611,14 @@ fn memories(
     Ok(out)
 }
 
-fn ops_since(repo: &Repo, cursor: Option<&str>) -> Result<Vec<Json>> {
+/// The ops since a cursor, newest first, each saying what it did, cut to a
+/// character budget: the entries, how many more there were, and the newest
+/// op, which is the cursor to pass next time.
+fn ops_since(
+    repo: &Repo,
+    cursor: Option<&str>,
+    chars: usize,
+) -> Result<(Vec<Json>, usize, Option<String>)> {
     let heads = repo.log.heads();
     let mut stop: HashSet<ObjectId> = HashSet::new();
     if let Some(c) = cursor {
@@ -569,27 +628,130 @@ fn ops_since(repo: &Repo, cursor: Option<&str>) -> Result<Vec<Json>> {
     }
     let mut seen = HashSet::new();
     let mut queue: VecDeque<ObjectId> = heads.into_iter().collect();
-    let mut ops = Vec::new();
+    let mut ops: Vec<(i64, ObjectId)> = Vec::new();
     while let Some(id) = queue.pop_front() {
         if stop.contains(&id) || !seen.insert(id) {
             continue;
         }
         let op = repo.log.get_op(&id)?;
-        ops.push((op.time, id, op.kind.clone(), op.author, op.effects.len()));
+        ops.push((op.time, id));
         queue.extend(op.parents.iter().copied());
     }
     ops.sort_by_key(|o| std::cmp::Reverse(o.0));
-    Ok(ops
-        .into_iter()
-        .map(|(t, id, kind, author, n)| json!({ "op": id.to_hex(), "kind": kind, "author": author.to_letters(), "time": t, "effects": n }))
-        .collect())
+    let newest = ops.first().map(|(_, id)| id.to_hex());
+    let total = ops.len();
+    let mut names: HashMap<EntityId, String> = HashMap::new();
+    let mut out = Vec::new();
+    let mut left = chars;
+    for (t, id) in ops {
+        let op = repo.log.get_op(&id)?;
+        let author = names
+            .entry(op.author)
+            .or_insert_with(|| {
+                repo.principal_name(&op.author)
+                    .unwrap_or_else(|| op.author.to_letters())
+            })
+            .clone();
+        let entry = json!({
+            "op": id.to_hex(), "kind": op.kind, "author": author, "time": t,
+            "what": op_summary(repo, &op),
+        });
+        let cost = json_len(&entry) + 1;
+        if cost > left {
+            break;
+        }
+        left -= cost;
+        out.push(entry);
+    }
+    let omitted = total - out.len();
+    Ok((out, omitted, newest))
+}
+
+/// One line on what an op did, read from its effects.
+fn op_summary(repo: &Repo, op: &tessra_core::object::Op) -> String {
+    let title_of = |id: &ObjectId| -> String {
+        repo.store()
+            .get::<Revision>(id)
+            .map(|r| r.title)
+            .unwrap_or_default()
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for e in &op.effects {
+        let part = match e {
+            Effect::Point { to, .. } => object_summary(repo, to),
+            Effect::Head { line, to, seq, .. } => {
+                Some(format!("landed {line} #{seq}: {}", title_of(to)))
+            }
+            Effect::Propose { rev } => Some(format!("proposed: {}", title_of(rev))),
+            Effect::Revoke { principal } => Some(format!(
+                "revoked {}",
+                repo.principal_name(principal)
+                    .unwrap_or_else(|| principal.to_letters())
+            )),
+            Effect::Put { id } if op.kind == "attest" => repo
+                .store()
+                .get::<tessra_core::object::Attestation>(id)
+                .ok()
+                .map(|a| format!("{} = {}", a.kind, cbor_to_json(&a.result))),
+            _ => None,
+        };
+        if let Some(p) = part {
+            if !parts.contains(&p) {
+                parts.push(p);
+            }
+        }
+    }
+    let mut s = parts.join("; ");
+    if s.len() > 200 {
+        let cut = fit_prefix(&s, 200);
+        s.truncate(cut);
+        s.push_str("...");
+    }
+    s
+}
+
+/// A short line naming the object a pointer moved to.
+fn object_summary(repo: &Repo, id: &ObjectId) -> Option<String> {
+    let bytes = repo.get_bytes(id).ok().flatten()?;
+    match cbor::peek_tag(&bytes).ok()?.as_str() {
+        "revision" => {
+            let r = cbor::decode::<Revision>(&bytes).ok()?;
+            Some(format!("{} (change {})", r.title, r.id.to_letters()))
+        }
+        "memory" => {
+            let m = cbor::decode::<Memory>(&bytes).ok()?;
+            let cut = fit_prefix(&m.body, 80);
+            let more = if cut < m.body.len() { "..." } else { "" };
+            Some(format!("{}: {}{more}", m.kind, &m.body[..cut]))
+        }
+        "standard" => Some("the standard".into()),
+        "principal" => {
+            let p = cbor::decode::<tessra_core::object::Principal>(&bytes).ok()?;
+            Some(format!("{} {}", p.kind, p.name))
+        }
+        "channel" => Some("a channel".into()),
+        "hook" => Some("a hook".into()),
+        "target" => Some("a target".into()),
+        "intent" => Some("an intent".into()),
+        _ => None,
+    }
+}
+
+/// A path for a response: without the verbatim prefix Windows puts on a
+/// canonical path, which no tool wants to see.
+fn display_path(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
 // ------------------------------------------------------------------ verbs
 
 fn status(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
-    let since = ops_since(repo, arg_str(args, "since"))?;
-    let mut result = json!({ "since": since });
+    let budget = args.get("budget").and_then(Json::as_u64).unwrap_or(4000) as usize;
+    // What happened gets half the budget, newest first; the rest of the
+    // budget is the agent's own situation.
+    let (since, omitted, cursor) = ops_since(repo, arg_str(args, "since"), budget * 2)?;
+    let mut result = json!({ "since": since, "since_omitted": omitted, "cursor": cursor });
     if let Some(ws) = actor_workspace(repo, actor) {
         let (rev_id, rev) = current_revision(repo, &ws)?;
         let (_, unmet, _) = standard_status(repo, &rev_id, &rev)?;
@@ -651,10 +813,19 @@ fn context(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let mut truncated = false;
     // The path's units are its map, so they are computed before the content
     // and the content leaves room for them: up to a quarter of the budget.
-    let units_all: Vec<Json> = match (path, actor_workspace(repo, actor)) {
-        (Some(p), Some(ws)) => {
-            let (_, rev) = current_revision(repo, &ws)?;
-            let (snap_id, _) = root_snapshot(repo, &rev)?;
+    // Reading needs no workspace: without one, the pack describes trunk,
+    // read from the store instead of a directory.
+    let ws = actor_workspace(repo, actor);
+    let (_, rev) = match &ws {
+        Some(w) => current_revision(repo, w)?,
+        None => {
+            let (head, _) = trunk_head(repo)?;
+            (head, repo.store().get::<Revision>(&head)?)
+        }
+    };
+    let (snap_id, snap) = root_snapshot(repo, &rev)?;
+    let units_all: Vec<Json> = match path {
+        Some(p) => {
             let (_, idx) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
             let by_nid: HashMap<EntityId, &tessra_core::object::Node> =
                 idx.nodes.iter().map(|n| (n.nid, n)).collect();
@@ -696,45 +867,96 @@ fn context(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         .min(budget);
     let mut files = Vec::new();
     if let Some(p) = path {
-        let ws = require_workspace(repo, actor)?;
-        let full = ws_path(&ws).join(p);
-        if full.is_dir() {
-            let mut names: Vec<String> = std::fs::read_dir(&full)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| n != ".git" && n != ".tessra")
-                .collect();
-            names.sort();
-            let total = names.len();
-            let mut room = chars_left.saturating_sub(64 + p.len() + reserve);
-            let mut kept = Vec::new();
-            for n in names {
-                let cost = n.len() + 3;
-                if cost > room {
-                    break;
+        // What is at the path: a directory's names or a file's bytes, from
+        // the workspace when there is one and from the revision's tree
+        // when there is not.
+        enum At {
+            Dir(Vec<String>),
+            File(Vec<u8>),
+            Missing,
+        }
+        let at = match &ws {
+            Some(w) => {
+                let full = ws_path(w).join(p);
+                if full.is_dir() {
+                    At::Dir(
+                        std::fs::read_dir(&full)?
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .filter(|n| n != ".git" && n != ".tessra")
+                            .collect(),
+                    )
+                } else if full.is_file() {
+                    At::File(std::fs::read(&full)?)
+                } else {
+                    At::Missing
                 }
-                room -= cost;
-                kept.push(n);
             }
-            let cut = kept.len() < total;
-            truncated |= cut;
-            let entry = json!({ "path": p, "dir": kept, "truncated": cut, "entries": total });
-            chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
-            files.push(entry);
-        } else if full.is_file() {
-            let bytes = std::fs::read(&full)?;
-            let text = String::from_utf8_lossy(&bytes);
-            let room = chars_left.saturating_sub(96 + p.len() + reserve);
-            let take = fit_prefix(&text, room);
-            let cut = take < text.len();
-            truncated |= cut;
-            let entry = json!({ "path": p, "content": &text[..take], "truncated": cut, "size": bytes.len() });
-            chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
-            files.push(entry);
-        } else {
-            let entry = json!({ "path": p, "missing": true });
-            chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
-            files.push(entry);
+            None => {
+                let flat = tree::flatten(repo.store(), &snap.root)?;
+                let key = p.trim_matches('/');
+                match flat.get(key).and_then(|leaf| leaf.r#ref) {
+                    Some(blob) => match repo.get_bytes(&blob)? {
+                        Some(b) => At::File(b),
+                        None => At::Missing,
+                    },
+                    None => {
+                        let prefix = if key.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{key}/")
+                        };
+                        let mut names: Vec<String> = flat
+                            .keys()
+                            .filter_map(|k| k.strip_prefix(prefix.as_str()))
+                            .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        if names.is_empty() {
+                            At::Missing
+                        } else {
+                            At::Dir(names)
+                        }
+                    }
+                }
+            }
+        };
+        match at {
+            At::Dir(mut names) => {
+                names.sort();
+                let total = names.len();
+                let mut room = chars_left.saturating_sub(64 + p.len() + reserve);
+                let mut kept = Vec::new();
+                for n in names {
+                    let cost = n.len() + 3;
+                    if cost > room {
+                        break;
+                    }
+                    room -= cost;
+                    kept.push(n);
+                }
+                let cut = kept.len() < total;
+                truncated |= cut;
+                let entry = json!({ "path": p, "dir": kept, "truncated": cut, "entries": total });
+                chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
+                files.push(entry);
+            }
+            At::File(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let room = chars_left.saturating_sub(96 + p.len() + reserve);
+                let take = fit_prefix(&text, room);
+                let cut = take < text.len();
+                truncated |= cut;
+                let entry = json!({ "path": p, "content": &text[..take], "truncated": cut, "size": bytes.len() });
+                chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
+                files.push(entry);
+            }
+            At::Missing => {
+                let entry = json!({ "path": p, "missing": true });
+                chars_left = chars_left.saturating_sub(json_len(&entry) + 1);
+                files.push(entry);
+            }
         }
     }
     // Then the units, memories, and claims, each list cut where the budget
@@ -1047,14 +1269,15 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                     cur.push(p);
                 }
             }
+            let omitted = cut_list(&mut history, (budget * 4).saturating_sub(120));
             ok(
-                json!({ "change": id.to_letters(), "history": history }),
+                json!({ "change": id.to_letters(), "history": history, "omitted": omitted }),
                 &[],
             )
         }
         "since" => {
-            let since = ops_since(repo, arg_str(args, "since"))?;
-            ok(json!({ "ops": since }), &[])
+            let (ops, omitted, cursor) = ops_since(repo, arg_str(args, "since"), budget * 4)?;
+            ok(json!({ "ops": ops, "omitted": omitted, "cursor": cursor }), &[])
         }
         "blame" => {
             let path = arg_str(args, "path")
@@ -1070,7 +1293,7 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                     "revision": e.revision.to_hex(), "author": e.author.to_letters(), "title": e.title,
                     "intent": e.intent.map(|i| i.to_letters()), "time": e.time,
                 });
-                let cost = 160 + e.title.len();
+                let cost = json_len(&j) + 1;
                 if cost > chars_left {
                     break;
                 }
@@ -1153,7 +1376,8 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 };
                 out.push(json!({ "request": id.to_letters(), "change": title, "author": author, "judges": judges, "asked": m.time, "reply": format!("tessra --as <human> approve --request {}", id.to_letters()), "body": m.body }));
             }
-            ok(json!({ "exceptions": out }), &["approve --request <id>"])
+            let omitted = cut_list(&mut out, (budget * 4).saturating_sub(120));
+            ok(json!({ "exceptions": out, "omitted": omitted }), &["approve --request <id>"])
         }
         "activity" => {
             // What happened in a window, at an altitude: summary, changes, or ops.
@@ -1339,8 +1563,13 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 .iter()
                 .max_by_key(|j| (j["score"].as_u64().unwrap_or(0), std::cmp::Reverse(j["from_head"].as_u64().unwrap_or(0))))
                 .cloned();
+            let candidates = ranking.len();
+            let omitted = cut_list(
+                &mut ranking,
+                (budget * 4).saturating_sub(best.as_ref().map(json_len).unwrap_or(0) + 160),
+            );
             ok(
-                json!({ "change": change, "candidates": ranking.len(), "best": best, "ranking": ranking }),
+                json!({ "change": change, "candidates": candidates, "best": best, "ranking": ranking, "omitted": omitted }),
                 &["workspace --action create --from <revision>"],
             )
         }
@@ -1473,14 +1702,17 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 if tests.is_empty() {
                     uncovered.push(n.name.clone());
                 }
-                let cost = 80 + n.name.len() + tests.len() * 60;
+                let entry = json!({ "nid": n.nid.to_letters(), "kind": n.kind, "name": n.name, "tests": tests });
+                let cost = json_len(&entry) + 1;
                 if cost > chars_left {
                     break;
                 }
                 chars_left -= cost;
-                out.push(json!({ "nid": n.nid.to_letters(), "kind": n.kind, "name": n.name, "tests": tests }));
+                out.push(entry);
             }
-            ok(json!({ "path": path, "units": out, "uncovered": uncovered }), &[])
+            let mut uncovered: Vec<Json> = uncovered.into_iter().map(Json::String).collect();
+            let uncovered_omitted = cut_list(&mut uncovered, chars_left);
+            ok(json!({ "path": path, "units": out, "uncovered": uncovered, "uncovered_omitted": uncovered_omitted }), &[])
         }
         "object" => {
             let prefix =
@@ -1529,12 +1761,14 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
     let action = arg_str(args, "action").unwrap_or("list");
     match action {
         "list" => {
-            let list: Vec<Json> = repo
+            let budget = args.get("budget").and_then(Json::as_u64).unwrap_or(4000) as usize;
+            let mut list: Vec<Json> = repo
                 .workspaces
                 .iter()
-                .map(|w| json!({ "id": w.id.to_letters(), "principal": w.principal.to_letters(), "path": ws_path(w).display().to_string(), "base": w.base.to_hex(), "current": w.current.map(|c| c.to_hex()) }))
+                .map(|w| json!({ "id": w.id.to_letters(), "principal": repo.principal_name(&w.principal).unwrap_or_else(|| w.principal.to_letters()), "path": display_path(&ws_path(w)), "base": w.base.to_hex(), "current": w.current.map(|c| c.to_hex()) }))
                 .collect();
-            ok(json!({ "workspaces": list }), &[])
+            let omitted = cut_list(&mut list, (budget * 4).saturating_sub(120));
+            ok(json!({ "workspaces": list, "omitted": omitted }), &[])
         }
         "create" => {
             let from = arg_str(args, "from").unwrap_or("trunk");
@@ -1592,7 +1826,7 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             repo.workspaces.push(ws);
             actor.workspace = Some(id);
             ok(
-                json!({ "workspace": id.to_letters(), "path": path.display().to_string(), "files": n, "base": base.to_hex(), "materialize_ms": materialize_ms, "state_restored": state_restored }),
+                json!({ "workspace": id.to_letters(), "path": display_path(&path), "files": n, "base": base.to_hex(), "materialize_ms": materialize_ms, "state_restored": state_restored }),
                 &["context --path .", "edit"],
             )
         }
@@ -1971,14 +2205,30 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         effects,
         now(),
     )?;
-    repo.commit_op(&op)?;
+    let op_id = repo.commit_op(&op)?;
+    // A retry with the same idempotency key recorded nothing new: the
+    // answer is the revision the first attempt recorded, and the workspace
+    // points at that one.
+    let (rev_id, rev, retried) = match repo.log.get_op(&op_id) {
+        Ok(recorded) if recorded.effects != op.effects => {
+            let earlier = recorded.effects.iter().find_map(|e| match e {
+                Effect::Point { to, .. } => Some(*to),
+                _ => None,
+            });
+            match earlier {
+                Some(r) => (r, repo.store().get::<Revision>(&r)?, true),
+                None => (rev_id, rev, false),
+            }
+        }
+        _ => (rev_id, rev, false),
+    };
     repo.clear_pending_ops(&ws.id)?;
     if let Some(w) = repo.workspace_mut(&ws.id) {
         w.current = Some(rev_id);
         let w2 = w.clone();
         repo.save_workspace(&w2)?;
     }
-    let mut result = json!({ "revision": rev_id.to_hex(), "change": rev.id.to_letters(), "files": out.files, "nodes": node_count, "flags": rev.flags.as_ref().map(flags_json), "anomaly": anomaly, "state": state_json, "env": env_json });
+    let mut result = json!({ "revision": rev_id.to_hex(), "change": rev.id.to_letters(), "files": out.files, "nodes": node_count, "flags": rev.flags.as_ref().map(flags_json), "anomaly": anomaly, "state": state_json, "env": env_json, "retried": retried });
     let mut next: Vec<&str> = vec!["verify", "promote --to proposed"];
     match arg_str(args, "then") {
         Some("verify") => {
@@ -1988,6 +2238,11 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         }
         Some("promote") => {
             let r = promote(repo, actor, &json!({ "to": "proposed" }))?;
+            result["promote"] = r.result;
+            next = vec!["status"];
+        }
+        Some("promote landed") | Some("land") => {
+            let r = promote(repo, actor, &json!({ "to": "landed" }))?;
             result["promote"] = r.result;
             next = vec!["status"];
         }
@@ -2183,9 +2438,22 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         ],
         now(),
     )?;
-    repo.commit_op(&op)?;
+    let op_id = repo.commit_op(&op)?;
+    // A retry with the same idempotency key names the memory the first
+    // attempt recorded.
+    let memory_id = match repo.log.get_op(&op_id) {
+        Ok(recorded) if recorded.effects != op.effects => recorded
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Point { entity, .. } => Some(*entity),
+                _ => None,
+            })
+            .unwrap_or(m.id),
+        _ => m.id,
+    };
     ok(
-        json!({ "memory": m.id.to_letters(), "kind": kind, "scope": { "kind": scope_kind, "ref": scope_ref } }),
+        json!({ "memory": memory_id.to_letters(), "kind": kind, "scope": { "kind": scope_kind, "ref": scope_ref } }),
         &[],
     )
 }
@@ -2907,13 +3175,12 @@ fn promote(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         (0, Vec::new(), Vec::new())
     };
     if !unmet.is_empty() {
-        let list: Vec<Json> = unmet
-            .iter()
-            .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
-            .collect();
-        return Err(Error::verb(
-            "STANDARD_UNMET",
-            serde_json::to_string(&list).unwrap_or_default(),
+        return Err(Error::unmet(
+            to,
+            unmet
+                .iter()
+                .map(|u| (u.clause.clone(), u.reason.clone()))
+                .collect(),
         ));
     }
     match to {
@@ -3115,13 +3382,12 @@ fn land_one(
         // is what a human sees and what the landing revision cites as prev.
         let request = ensure_approval_request(repo, &rev_id, &rev, &unmet)?;
         note_approval(&mut unmet, &request);
-        let list: Vec<Json> = unmet
-            .iter()
-            .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
-            .collect();
-        return Err(Error::verb(
-            "STANDARD_UNMET",
-            serde_json::to_string(&list).unwrap_or_default(),
+        return Err(Error::unmet(
+            "landed",
+            unmet
+                .iter()
+                .map(|u| (u.clause.clone(), u.reason.clone()))
+                .collect(),
         ));
     }
     let vs = ViewState::new(repo.store());
@@ -6148,5 +6414,216 @@ mod tests {
             &json!({ "to": "landed", "all": true }),
         );
         assert_eq!(out["result"]["landed"], json!(1), "{out}");
+    }
+
+    #[test]
+    fn status_since_is_newest_first_bounded_and_says_what_happened() {
+        let (_dir, mut repo, mut owner) = scratch();
+        for i in 0..12 {
+            let out = call(
+                &mut repo,
+                &mut owner,
+                "remember",
+                &json!({ "kind": "gotcha", "body": format!("gotcha number {i} about the build"), "scope": { "kind": "path", "ref": "src" } }),
+            );
+            assert_eq!(out["ok"], json!(true), "{out}");
+        }
+        let out = call(&mut repo, &mut owner, "status", &json!({ "budget": 800 }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let since = out["result"]["since"].as_array().unwrap();
+        assert!(!since.is_empty(), "{out}");
+        assert!(since.len() < 13, "cut to the budget: {out}");
+        assert!(
+            out["result"]["since_omitted"].as_u64().unwrap() > 0,
+            "{out}"
+        );
+        assert_eq!(since[0]["kind"], json!("remember"), "newest first: {out}");
+        assert!(
+            since[0]["what"]
+                .as_str()
+                .unwrap()
+                .contains("gotcha number 11"),
+            "{out}"
+        );
+        assert!(out["result"]["cursor"].is_string(), "{out}");
+        assert!(out["budget"]["used"].as_u64().unwrap() <= 800, "{out}");
+        // Since that cursor, nothing has happened.
+        let cursor = out["result"]["cursor"].as_str().unwrap().to_string();
+        let out = call(&mut repo, &mut owner, "status", &json!({ "since": cursor }));
+        assert_eq!(out["result"]["since"].as_array().unwrap().len(), 0, "{out}");
+        assert_eq!(out["result"]["since_omitted"], json!(0), "{out}");
+    }
+
+    #[test]
+    fn context_path_without_a_workspace_describes_trunk() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 { 1 }" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        assert!(actor_workspace(&repo, &bot).is_none());
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "context",
+            &json!({ "path": "src/lib.rs", "budget": 2000 }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert!(
+            out["result"]["files"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("pub fn one"),
+            "{out}"
+        );
+        assert_eq!(out["result"]["units"][0]["name"], json!("one"), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "context",
+            &json!({ "path": "src", "budget": 2000 }),
+        );
+        assert_eq!(out["result"]["files"][0]["dir"], json!(["lib.rs"]), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "context",
+            &json!({ "path": "nowhere.rs", "budget": 2000 }),
+        );
+        assert_eq!(out["result"]["files"][0]["missing"], json!(true), "{out}");
+    }
+
+    #[test]
+    fn a_refused_promotion_lists_each_unmet_clause_with_a_fix() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "require": ["attest(tests.pass)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 { 1 }" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["code"], json!("STANDARD_UNMET"), "{out}");
+        assert_eq!(out["stage"], json!("landed"), "{out}");
+        assert_eq!(out["fix"], json!("verify"), "{out}");
+        let unmet = out["unmet"].as_array().unwrap();
+        assert_eq!(unmet.len(), 1, "{out}");
+        assert!(
+            unmet[0]["clause"]
+                .as_str()
+                .unwrap()
+                .contains("attest(tests.pass)"),
+            "{out}"
+        );
+        assert_eq!(unmet[0]["fix"], json!("verify"), "{out}");
+        assert!(unmet[0]["reason"].is_string(), "{out}");
+        assert!(
+            out["message"]
+                .as_str()
+                .unwrap()
+                .contains("attest(tests.pass)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_retried_snapshot_reports_what_the_first_one_recorded() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "a.txt", "content": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let first = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one", "idem": "same-key" }),
+        );
+        assert_eq!(first["ok"], json!(true), "{first}");
+        assert_eq!(first["result"]["retried"], json!(false), "{first}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "a.txt", "content": "two" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let again = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "two", "idem": "same-key" }),
+        );
+        assert_eq!(again["ok"], json!(true), "{again}");
+        assert_eq!(
+            again["result"]["revision"], first["result"]["revision"],
+            "{again}"
+        );
+        assert_eq!(again["result"]["retried"], json!(true), "{again}");
+        assert_eq!(
+            again["state"]["revision"], first["result"]["revision"],
+            "{again}"
+        );
+        let m1 = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "once", "scope": { "kind": "path", "ref": "src" }, "idem": "mem-key" }),
+        );
+        let m2 = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "twice", "scope": { "kind": "path", "ref": "src" }, "idem": "mem-key" }),
+        );
+        assert_eq!(m1["result"]["memory"], m2["result"]["memory"], "{m2}");
+    }
+
+    #[test]
+    fn a_session_finds_its_workspace_again_after_the_daemon_forgets() {
+        let (_dir, mut repo, _) = scratch();
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "create" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert!(bot.workspace.is_some(), "{out}");
+        repo.remember_session_workspace(&bot).unwrap();
+        let reopened = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        assert_eq!(reopened.workspace, bot.workspace);
     }
 }

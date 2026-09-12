@@ -66,8 +66,11 @@ enum Cmd {
     },
     /// Where am I: task, claims, standard status, what changed since a cursor.
     Status {
+        /// The cursor a previous status returned; only what happened after it is listed.
         #[arg(long)]
         since: Option<String>,
+        #[arg(long, default_value_t = 4000)]
+        budget: u64,
     },
     /// A context pack for a path, or for one unit (--unit name or path:name), within a token budget.
     Context {
@@ -79,7 +82,7 @@ enum Cmd {
         #[arg(long, default_value_t = 4000)]
         budget: u64,
     },
-    /// The M1 query subset: memory, revision, since, object.
+    /// Read the graph: memory, revision, since, object, blame, tests, diff, trusted, bisect, activity, or exceptions, cut to a budget.
     Query {
         #[arg(long, default_value = "memory")]
         kind: String,
@@ -609,7 +612,9 @@ fn run() -> i32 {
                 if a.kind == "daemon" && !a.credentialed {
                     a.credentialed = repo.owner_credential_ok(presented.as_deref());
                 }
-                verbs::call(&mut repo, a, verb, args)
+                let out = verbs::call(&mut repo, a, verb, args);
+                let _ = repo.remember_session_workspace(a);
+                out
             })
         }
     };
@@ -650,7 +655,7 @@ fn run() -> i32 {
 fn to_call(cmd: &Cmd) -> (&'static str, Value) {
     match cmd {
         Cmd::Init { .. } | Cmd::Mcp | Cmd::Daemon { .. } => ("status", json!({})),
-        Cmd::Status { since } => ("status", json!({ "since": since })),
+        Cmd::Status { since, budget } => ("status", json!({ "since": since, "budget": budget })),
         Cmd::Context { unit, path, budget } => (
             "context",
             json!({ "unit": unit, "path": path, "budget": budget }),

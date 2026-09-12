@@ -273,7 +273,8 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
     }
     let out = verbs::call(&mut repo, &mut actor, &req.verb, &req.args);
     // Remember a workspace the session created, so later calls without an
-    // explicit workspace keep using it.
+    // explicit workspace keep using it, here and across a restart.
+    let _ = repo.remember_session_workspace(&actor);
     if let (Some(name), Some(ws)) = (&req.agent, actor.workspace) {
         let write = if req.write.is_empty() {
             vec!["**".to_string()]

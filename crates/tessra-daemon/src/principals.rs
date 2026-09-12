@@ -330,11 +330,19 @@ impl Repo {
                     exp.trim().parse::<i64>(),
                 ) {
                     if exp > now() && !self.is_revoked(&id) {
+                        // The workspace the session was using, if it is
+                        // still there, so a daemon that restarted or a
+                        // command that is its own daemon picks up where
+                        // the session left off.
+                        let workspace = lines
+                            .next()
+                            .and_then(|l| EntityId::from_letters(l.trim()).ok())
+                            .filter(|w| self.workspace(w).is_some());
                         return Ok(Actor {
                             signer: Signer { principal: id, key },
                             cap: Some(cap),
                             write_paths: Some(write_paths),
-                            workspace: None,
+                            workspace,
                             kind: "session".into(),
                             credentialed: false,
                         });
@@ -426,6 +434,38 @@ impl Repo {
             kind: "session".into(),
             credentialed: false,
         })
+    }
+
+    /// Keep the workspace a session is using beside its key, so a daemon
+    /// that restarts, or the next command that is its own daemon, finds it
+    /// again instead of guessing from the principal's workspaces.
+    pub fn remember_session_workspace(&self, actor: &Actor) -> Result<()> {
+        let (Some(ws), Some(write)) = (actor.workspace, actor.write_paths.as_ref()) else {
+            return Ok(());
+        };
+        if actor.kind != "session" {
+            return Ok(());
+        }
+        let Some(agent) = self.session_agent(&actor.principal()) else {
+            return Ok(());
+        };
+        let Some(name) = self.principal_name(&agent) else {
+            return Ok(());
+        };
+        let (meta_path, _) = self.session_files(&name, write);
+        let Ok(meta) = std::fs::read_to_string(&meta_path) else {
+            return Ok(());
+        };
+        let mut lines: Vec<String> = meta.lines().take(3).map(str::to_string).collect();
+        if lines.len() < 3 {
+            return Ok(());
+        }
+        if meta.lines().nth(3).map(str::trim) == Some(ws.to_letters().as_str()) {
+            return Ok(());
+        }
+        lines.push(ws.to_letters());
+        std::fs::write(&meta_path, lines.join("\n") + "\n")?;
+        Ok(())
     }
 
     /// The principal a human or external name was granted, without acting
