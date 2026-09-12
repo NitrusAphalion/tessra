@@ -151,6 +151,7 @@ tessra export --format git --branch main --push origin   # the same, then push t
 
 git pull                                                 # teammates' commits arrive with git, as always
 tessra import --branch main                              # each new commit lands on trunk as a change of its own
+tessra import --branch main --history                    # the same, as history: outside the standard, no verifiers, no hooks
 ```
 
 That is the whole rhythm: land, export, push; pull, import. The daemon does not watch `.git/refs` yet, so run `import` yourself after a pull.
@@ -159,6 +160,7 @@ What to expect:
 
 - Export writes commits on top of the newest exported or imported one, in trunk order, and moves the branch ref. A clean checkout of that branch is reset to the new tip; a dirty one is left alone, and the response says so.
 - Export is linear. A landing that merged concurrent changes becomes one commit, not a git merge. Import is first-parent, and a commit that conflicts with trunk stops the import at that commit.
+- Import lands each commit through the standard, so a commit whose tests fail, or that edits a test nobody approved, stops the import too. `--history` lands the commits as history instead, the way `init` lands the commits it imports: outside the standard, with no verifiers and no hooks, and it takes the owner credential. Use it for history that already exists and was checked elsewhere, not for a commit that is really a proposal.
 - `.tessra/` shows up as untracked until you add it to `.gitignore`. Nothing else in the tree changes.
 
 ## How it works

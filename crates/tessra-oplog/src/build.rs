@@ -425,6 +425,162 @@ mod tests {
         assert_eq!(ViewState::new(log.store()).entity(&v, &m.id).unwrap(), None);
     }
 
+    /// A `head` that cites nothing on a standard that requires an
+    /// attestation is admitted only as an owner's `import` of a revision
+    /// with a legacy intent sitting on the head: a git commit landed as
+    /// history. Any other shape is held to the standard.
+    #[test]
+    fn a_history_landing_is_an_owners_import_with_a_legacy_intent_on_the_head() {
+        use tessra_core::object::{Clause, Intent, Predicate, Revision, Standard};
+
+        let mut log = OpLog::new(MemoryStore::new());
+        let key = SecretKey::generate();
+        let init = init(&mut log, &key, "d", 1).unwrap();
+        let signer = Signer {
+            principal: init.daemon,
+            key: SecretKey::from_bytes(&key.to_bytes()),
+        };
+        // A standard nothing unattested can meet.
+        let v = log.current_view().unwrap();
+        let std_cur = ViewState::new(log.store())
+            .entity(&v, &init.standard)
+            .unwrap()
+            .unwrap()
+            .single()
+            .unwrap();
+        let mut standard: Standard = log.store().get(&std_cur).unwrap();
+        standard.prev = Some(std_cur);
+        standard.clauses.push(Clause {
+            op: "require".into(),
+            pred: Predicate {
+                kind: "attest".into(),
+                name: Some("tests.pass".into()),
+                args: None,
+            },
+            unless: None,
+        });
+        let sid = log.store().put(&standard).unwrap();
+        let op = build_op(
+            &log,
+            &signer,
+            None,
+            "standard",
+            args_with_idem([1; 16], BTreeMap::new()),
+            vec![
+                Effect::Put { id: sid },
+                point_effect(&log, init.standard, sid).unwrap(),
+            ],
+            2,
+        )
+        .unwrap();
+        log.accept(&op).unwrap();
+
+        let head: Revision = log.store().get(&init.root_revision).unwrap();
+        let legacy = Intent {
+            id: EntityId::random(),
+            prev: None,
+            title: "an old commit".into(),
+            body: None,
+            spec: None,
+            evals: None,
+            parent: None,
+            depends: None,
+            priority: 0,
+            status: "done".into(),
+            assignee: None,
+            created_by: EntityId([0; 16]),
+            time: 1,
+            legacy: Some(true),
+        };
+        let plain = Intent {
+            id: EntityId::random(),
+            legacy: None,
+            ..legacy.clone()
+        };
+        // An op of `kind` landing a revision with `intent` and `parents`,
+        // citing no attestation, from the root revision as head.
+        let attempt = |log: &OpLog<MemoryStore>,
+                       kind: &str,
+                       intent: &Intent,
+                       parents: Vec<ObjectId>,
+                       idem: u8|
+         -> Op {
+            let iid = log.store().put(intent).unwrap();
+            let rev = Revision {
+                id: EntityId::random(),
+                prev: None,
+                snapshots: head.snapshots.clone(),
+                parents,
+                intent: Some(intent.id),
+                title: "history".into(),
+                body: None,
+                author: init.daemon,
+                time: 3,
+                ops: None,
+                flags: None,
+            };
+            let rid = log.store().put(&rev).unwrap();
+            let seq = log.current_view().unwrap().lines["trunk"].seq;
+            build_op(
+                log,
+                &signer,
+                None,
+                kind,
+                args_with_idem([idem; 16], BTreeMap::new()),
+                vec![
+                    Effect::Put { id: iid },
+                    Effect::Point {
+                        entity: intent.id,
+                        to: iid,
+                        from: None,
+                    },
+                    Effect::Put { id: rid },
+                    Effect::Point {
+                        entity: rev.id,
+                        to: rid,
+                        from: None,
+                    },
+                    Effect::Head {
+                        line: "trunk".into(),
+                        to: rid,
+                        from: Some(Pointer::Id(init.root_revision).to_value()),
+                        seq: seq + 1,
+                        attests: vec![],
+                        id: None,
+                    },
+                ],
+                4,
+            )
+            .unwrap()
+        };
+
+        // A landing, however legacy its intent, is held to the standard.
+        let op = attempt(&log, "land", &legacy, vec![init.root_revision], 2);
+        let err = log.accept(&op).unwrap_err().to_string();
+        assert!(err.contains("standard"), "{err}");
+        // An import of a revision whose intent is not legacy, likewise.
+        let op = attempt(&log, "import", &plain, vec![init.root_revision], 3);
+        let err = log.accept(&op).unwrap_err().to_string();
+        assert!(err.contains("standard"), "{err}");
+        // History sits on the head itself; a revision off it is refused.
+        let op = attempt(&log, "import", &legacy, vec![], 4);
+        let err = log.accept(&op).unwrap_err().to_string();
+        assert!(err.contains("history"), "{err}");
+        // The owner's import of a legacy revision on the head lands.
+        let op = attempt(&log, "import", &legacy, vec![init.root_revision], 5);
+        let landed_to = match &op.effects[4] {
+            Effect::Head { to, .. } => *to,
+            _ => unreachable!(),
+        };
+        log.accept(&op).unwrap();
+        let v = log.current_view().unwrap();
+        assert_eq!(v.lines["trunk"].seq, 1);
+        assert_eq!(
+            crate::view::line_head(&v.lines["trunk"]),
+            Some(Pointer::Id(landed_to))
+        );
+    }
+
     #[test]
     fn stale_from_is_rejected() {
         let mut log = OpLog::new(MemoryStore::new());

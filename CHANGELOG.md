@@ -6,6 +6,7 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ### Added
 
+- `import --branch <b> --history` lands the commits a branch gained as history, the way `init --history` lands the commits it imports: each commit's tree becomes the next trunk revision with a legacy intent, outside the standard, with no verifiers and no hooks. It takes the owner credential. The op verifier admits such a landing from an owner's `import` op only, on the head only; an owner could reach the same state by emptying the standard and restoring it, so it grants nothing new and keeps the record honest. History that was checked elsewhere no longer has to pass this repository's standard commit by commit, or wait on a human to approve every test it edited; a request the standard had opened for one of the commits is closed once it is history.
 - A design document, docs/SYNC.md, for one repository on many machines: what replicates, who lands, how a machine joins, a blob-store remote before any socket, and the five steps that build it, each with its demo. The spec already carried the mechanism; this sequences it.
 - A CI workflow runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test --workspace` on every pull request and push to `main`, on Ubuntu, macOS, and Windows, and checks the workspace builds with the declared minimum Rust.
 - `TESSRA_DATA_DIR` overrides where the store, keys, and workspaces live, and `InitOptions::data_dir` does the same for one repository. The test suite uses it so a run leaves nothing under the local application data directory.
@@ -25,6 +26,7 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- An `import` retried after the standard refused a commit was rejected by the op verifier, because the refused attempt had left the change pointed at its revision and the retry pointed it again from nothing. The retry is now the next version of that change.
 - A memory about a unit or a path is anchored to that content when it is recorded, and recalled as `stale`, listed last, once the content has changed or gone. `remember --supersedes <id>` records a replacement and retires the earlier memory in the same op, and `remember --retire <id>` takes a memory back; retired and superseded memories are not recalled. Two gotchas in this repository that were fixed days ago were still recalled beside their corrections.
 - JavaScript and TypeScript `test(...)`, `it(...)`, and `describe(...)` blocks are units of kind `test` named by their title (`.skip` and `x`-prefixed forms are `test.skipped`), so the covering-tests relation, `changed.covered`, and the test-change guards see them; they were nameless statements before, and a JavaScript file had no tests as far as the standard knew.
 - The node merge keys units by node ID, resolved through the aliases of the base and both sides, instead of recomputing `(kind, name, ordinal)` per side, so the history-aware identity the index keeps now decides what lines up with what. Same-named siblings such as overloads match by body first, so one inserted above another no longer drifts into a spurious conflict.

@@ -118,4 +118,4 @@ The first three steps are enough for a team. The fourth is a week of polish. The
 
 ## Until then
 
-The git bridge is the team path today. `export --format git` on one machine, then `git pull` and `import --branch` on the other, moves landed trunk between machines, one commit per landing, and the round trip rewrites nothing. What it does not move is everything that makes Tessra more than git: proposals, attestations, memories, claims, and the standard's verdicts stay on the machine that produced them, and the second machine lands each imported commit again under its own standard.
+The git bridge is the team path today. `export --format git` on one machine, then `git pull` and `import --branch` on the other, moves landed trunk between machines, one commit per landing, and the round trip rewrites nothing. What it does not move is everything that makes Tessra more than git: proposals, attestations, memories, claims, and the standard's verdicts stay on the machine that produced them, and the second machine lands each imported commit again under its own standard, or as history with `--history` when the first machine already proved it.

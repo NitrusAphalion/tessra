@@ -424,6 +424,9 @@ enum Cmd {
     Import {
         #[arg(long, default_value = "main")]
         branch: String,
+        /// Land the commits as history, the way `init --history` does: outside the standard, with no verifiers and no hooks. Takes the owner credential
+        #[arg(long)]
+        history: bool,
     },
     /// Measure the M1 performance budgets and record them as an attestation.
     Bench,
@@ -729,7 +732,9 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
             "export",
             json!({ "format": format, "path": path, "branch": branch, "push": push }),
         ),
-        Cmd::Import { branch } => ("import", json!({ "branch": branch })),
+        Cmd::Import { branch, history } => {
+            ("import", json!({ "branch": branch, "history": history }))
+        }
         Cmd::Bench => ("bench", json!({})),
         Cmd::Snapshot {
             title,

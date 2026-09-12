@@ -10,11 +10,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use ciborium::value::Value as Cbor;
 use serde_json::{json, Value as Json};
-use tessra_core::object::{EntryKind, Revision, Snapshot};
+use tessra_core::object::{Effect, EntryKind, Revision, Snapshot};
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build;
+use tessra_oplog::view::Pointer;
 
 use crate::gitimport;
 use crate::principals::Actor;
@@ -356,7 +358,7 @@ pub fn export_git(
 /// Import commits on a branch that trunk does not know yet, first-parent
 /// order, each as a change landed by the coordinator: fast-forward when
 /// the commit's parent is the head, a merge otherwise.
-pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Json> {
+pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str, history: bool) -> Result<Json> {
     let work = repo.root.clone();
     let tip = git_out(
         &work,
@@ -396,7 +398,7 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         }
         // The commit's snapshot is indexed against the trunk head it lands
         // on, so its units keep the identity trunk knows them by.
-        let (head_id, _) = crate::verbs::trunk_head_of(repo)?;
+        let (head_id, seq) = crate::verbs::trunk_head_of(repo)?;
         let head_rev: Revision = repo.store().get(&head_id)?;
         let (_, head_snap) = crate::verbs::root_snapshot_of(repo, &head_rev)?;
         let (index_id, index) = crate::semantic::index_for_revision(repo.store(), &head_rev)?;
@@ -416,9 +418,20 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         );
         repo.store().end_batch()?;
         let (content, _) = content?;
+        // A refused attempt before this one left the change pointed at its
+        // revision; this attempt is the next version of that change, and
+        // the pointer moves from what is there.
+        let change_id = content.change.unwrap_or_else(EntityId::random);
+        let prev = {
+            let view = repo.log.current_view()?;
+            match tessra_oplog::ViewState::new(repo.store()).entity(&view, &change_id)? {
+                Some(Pointer::Id(cur)) => Some(cur),
+                _ => None,
+            }
+        };
         let rev = Revision {
-            id: content.change.unwrap_or_else(EntityId::random),
-            prev: None,
+            id: change_id,
+            prev,
             snapshots: std::collections::BTreeMap::from([("".to_string(), content.snapshot)]),
             parents: vec![head_id],
             intent: content.intent.as_ref().map(|i| i.id),
@@ -431,21 +444,48 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         };
         let rev_id = repo.store().put(&rev)?;
         let mut effects = vec![
-            tessra_core::object::Effect::Put { id: rev_id },
-            tessra_core::object::Effect::Point {
-                entity: rev.id,
-                to: rev_id,
-                from: None,
-            },
+            Effect::Put { id: rev_id },
+            build::point_effect(&repo.log, rev.id, rev_id)?,
         ];
         if let Some(intent) = &content.intent {
             let ioid = repo.store().put(intent)?;
-            effects.push(tessra_core::object::Effect::Put { id: ioid });
-            effects.push(tessra_core::object::Effect::Point {
-                entity: intent.id,
-                to: ioid,
-                from: None,
+            effects.push(Effect::Put { id: ioid });
+            effects.push(build::point_effect(&repo.log, intent.id, ioid)?);
+        }
+        if history {
+            // History lands the way `init --history` lands the commits before
+            // it: the commit's tree is the next trunk revision, on the head,
+            // with its legacy intent, citing nothing. The verifier admits it
+            // from an owner's `import` op and from nobody else. No workspace,
+            // no verifiers, no hooks: the commit is the past, not a proposal.
+            effects.push(Effect::Head {
+                line: "trunk".into(),
+                to: rev_id,
+                from: Some(Pointer::Id(head_id).to_value()),
+                seq: seq + 1,
+                attests: vec![],
+                id: None,
             });
+            let args = std::collections::BTreeMap::from([
+                ("history".to_string(), Cbor::Bool(true)),
+                ("commit".to_string(), Cbor::Text(commit.clone())),
+            ]);
+            let op = build::build_op(
+                &repo.log,
+                &actor.signer,
+                actor.cap,
+                "import",
+                build::args_with_idem(EntityId::random().0, args),
+                effects,
+                now(),
+            )?;
+            repo.commit_op(&op)?;
+            remember(repo, &rev_id, commit)?;
+            imported.push(json!({
+                "commit": commit, "title": content.title, "landed": true, "history": true,
+                "revision": rev_id.to_hex(), "seq": seq + 1,
+            }));
+            continue;
         }
         let op = build::build_op(
             &repo.log,
@@ -494,11 +534,17 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
             }
         }
     }
+    if history {
+        // A request the standard opened for one of these commits, when it
+        // refused it as a proposal, is over now that the commit is history.
+        crate::verbs::close_landed_requests(repo)?;
+    }
     // The checkout itself moved with git; its workspace follows HEAD.
     let workspace = follow_checkout(repo, &work)?;
-    Ok(
-        json!({ "branch": branch, "tip": tip, "imported": imported.len(), "commits": imported, "workspace": workspace }),
-    )
+    Ok(json!({
+        "branch": branch, "tip": tip, "history": history,
+        "imported": imported.len(), "commits": imported, "workspace": workspace,
+    }))
 }
 
 #[cfg(test)]
@@ -573,7 +619,7 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "two"]);
-        let out = import_git(&mut repo, &mut actor, "main").unwrap();
+        let out = import_git(&mut repo, &mut actor, "main", false).unwrap();
         assert_eq!(out["imported"], json!(1), "{out}");
         assert_eq!(out["commits"][0]["landed"], json!(true), "{out}");
         assert_eq!(out["workspace"]["workspace"], json!("followed"), "{out}");
@@ -594,9 +640,108 @@ mod tests {
         );
         assert_eq!(status["result"]["title"], json!("two"), "{status}");
         // Nothing new to import: the workspace is already there.
-        let out = import_git(&mut repo, &mut actor, "main").unwrap();
+        let out = import_git(&mut repo, &mut actor, "main", false).unwrap();
         assert_eq!(out["imported"], json!(0), "{out}");
         assert_eq!(out["workspace"]["workspace"], json!("at HEAD"), "{out}");
+    }
+
+    /// A commit the standard refuses lands as history with `--history`:
+    /// outside the standard, on the head, with its legacy intent, and only
+    /// with the owner credential. The refused attempt before it left the
+    /// change pointed at its revision, and the retry builds on that.
+    #[test]
+    fn import_history_lands_what_the_standard_refuses() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let mut owner = repo.owner_actor();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "require": ["attest(tests.pass)", "approved(human)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let exceptions = |repo: &mut Repo| -> usize {
+            let mut a = repo.daemon_actor();
+            let out = crate::verbs::call(repo, &mut a, "query", &json!({ "kind": "exceptions" }));
+            out["result"]["exceptions"].as_array().map_or(0, Vec::len)
+        };
+        let before = root_at(&repo);
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "two"]);
+        let commit = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+
+        // Through the standard, the commit does not land.
+        let out = import_git(&mut repo, &mut owner, "main", false).unwrap();
+        assert_eq!(out["commits"][0]["landed"], json!(false), "{out}");
+        assert!(
+            out["commits"][0]["why"]
+                .as_str()
+                .unwrap()
+                .contains("tests.pass"),
+            "{out}"
+        );
+        assert_eq!(crate::verbs::trunk_head_of(&repo).unwrap().0, before);
+        assert!(revision_of_commit(&repo, &commit).unwrap().is_none());
+        // The refusal asked a human; that request is open.
+        assert_eq!(exceptions(&mut repo), 1);
+
+        // Reaching the daemon is not enough to land history.
+        let mut token_only = repo.daemon_actor();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut token_only,
+            "import",
+            &json!({ "branch": "main", "history": true }),
+        );
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+
+        // As history, it lands: no attestation, the commit's own intent.
+        let out = import_git(&mut repo, &mut owner, "main", true).unwrap();
+        assert_eq!(out["history"], json!(true), "{out}");
+        assert_eq!(out["commits"][0]["landed"], json!(true), "{out}");
+        assert_eq!(out["commits"][0]["history"], json!(true), "{out}");
+        assert_eq!(out["workspace"]["workspace"], json!("followed"), "{out}");
+        let (head, seq) = crate::verbs::trunk_head_of(&repo).unwrap();
+        assert_ne!(head, before);
+        assert_eq!(seq, 1);
+        assert_eq!(root_at(&repo), head);
+        assert_eq!(revision_of_commit(&repo, &commit).unwrap(), Some(head));
+        let landed: Revision = repo.store().get(&head).unwrap();
+        assert_eq!(landed.parents, vec![before], "history sits on the head");
+        let view = repo.log.current_view().unwrap();
+        let vs = tessra_oplog::ViewState::new(repo.store());
+        let intent: tessra_core::object::Intent = repo
+            .store()
+            .get(
+                &vs.entity(&view, &landed.intent.unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .single()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(intent.legacy, Some(true));
+        // The landing op is the newest one that advanced trunk; closing the
+        // request came after it.
+        let mut op_id = repo.log.heads()[0];
+        let landing_op = loop {
+            let op = repo.log.get_op(&op_id).unwrap();
+            if op.effects.iter().any(|e| matches!(e, Effect::Head { .. })) {
+                break op;
+            }
+            op_id = op.parents[0];
+        };
+        assert_eq!(landing_op.kind, "import");
+        assert!(landing_op.effects.iter().any(|e| matches!(
+            e,
+            Effect::Head { attests, .. } if attests.is_empty()
+        )));
+        // The commit is history now, so the request about it is closed.
+        assert_eq!(exceptions(&mut repo), 0);
+        // Nothing left to import.
+        let out = import_git(&mut repo, &mut owner, "main", true).unwrap();
+        assert_eq!(out["imported"], json!(0), "{out}");
     }
 
     #[test]
@@ -617,7 +762,7 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
         git(dir.path(), &["add", "b.txt"]);
         git(dir.path(), &["commit", "-q", "-m", "two"]);
-        let out = import_git(&mut repo, &mut actor, "main").unwrap();
+        let out = import_git(&mut repo, &mut actor, "main", false).unwrap();
         assert_eq!(out["imported"], json!(1), "{out}");
         assert_eq!(out["workspace"]["workspace"], json!("left alone"), "{out}");
         assert_eq!(

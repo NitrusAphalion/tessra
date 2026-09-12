@@ -4950,6 +4950,46 @@ pub fn deliver_to_channels(repo: &Repo, payload: &Json, only: Option<&str>) -> R
 
 /// A landed revision needs no more asking: close its open requests.
 fn close_requests_for(repo: &mut Repo, rev_id: &ObjectId) -> Result<()> {
+    close_requests_where(repo, |m| m.links.iter().flatten().any(|l| l == rev_id))
+}
+
+/// A change that landed by another path, a history import among them,
+/// needs no more asking either: close every open request whose change is
+/// landed now, whichever revision of it the request asked about.
+pub(crate) fn close_landed_requests(repo: &mut Repo) -> Result<()> {
+    let moot: HashSet<EntityId> = {
+        let view = repo.log.current_view()?;
+        let vs = ViewState::new(repo.store());
+        let landed = landed_revisions(repo.store(), &view)?;
+        let mut moot = HashSet::new();
+        for (id, ptr) in vs.entities(&view)? {
+            let Ok(oid) = ptr.single() else { continue };
+            let Ok(m) = repo.store().get::<Memory>(&oid) else {
+                continue;
+            };
+            if m.kind != "question" || m.status != "active" {
+                continue;
+            }
+            let landed_now = m.links.iter().flatten().any(|l| {
+                repo.store()
+                    .get::<Revision>(l)
+                    .ok()
+                    .and_then(|r| vs.entity(&view, &r.id).ok().flatten())
+                    .and_then(|p| p.single().ok())
+                    .map(|cur| landed.contains(&cur))
+                    .unwrap_or(false)
+            });
+            if landed_now {
+                moot.insert(id);
+            }
+        }
+        moot
+    };
+    close_requests_where(repo, |m| moot.contains(&m.id))
+}
+
+/// Close every open approval request `moot` says is over, in one op.
+fn close_requests_where(repo: &mut Repo, moot: impl Fn(&Memory) -> bool) -> Result<()> {
     let view = repo.log.current_view()?;
     let vs = ViewState::new(repo.store());
     let mut effects = Vec::new();
@@ -4961,7 +5001,7 @@ fn close_requests_for(repo: &mut Repo, rev_id: &ObjectId) -> Result<()> {
         if m.kind == "question"
             && m.status == "active"
             && m.body.starts_with("Approval needed")
-            && m.links.iter().flatten().any(|l| l == rev_id)
+            && moot(&m)
         {
             let mut closed = m.clone();
             closed.prev = Some(oid);
@@ -5390,7 +5430,13 @@ fn import_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
         return Err(Error::verb("SCOPE", "only the owner imports from git"));
     }
     let branch = arg_str(args, "branch").unwrap_or("main");
-    let out = crate::bridge::import_git(repo, actor, branch)?;
+    let history = args.get("history").and_then(Json::as_bool).unwrap_or(false);
+    if history {
+        // Landing outside the standard is a policy act, like editing the
+        // standard itself: reaching the daemon is not enough.
+        require_owner_credential(repo, actor, "import --history")?;
+    }
+    let out = crate::bridge::import_git(repo, actor, branch, history)?;
     ok(out, &["export --format git"])
 }
 

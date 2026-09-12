@@ -8,7 +8,9 @@ use std::collections::{HashSet, VecDeque};
 
 use ciborium::value::Value;
 use tessra_core::cbor;
-use tessra_core::object::{Capability, Effect, Hook, Memory, Op, Principal, Revision, Tree, View};
+use tessra_core::object::{
+    Capability, Effect, Hook, Intent, Memory, Op, Principal, Revision, Tree, View,
+};
 use tessra_core::sig::SignedObject;
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
@@ -832,6 +834,32 @@ fn check_legality<S: ObjectStore>(
                                 ));
                             }
                         }
+                        // A git commit landed as history: an owner's `import`
+                        // op whose revision carries a legacy intent and sits
+                        // on the head, the way `init --history` lands the
+                        // commits before it. It cites nothing and the standard
+                        // is not evaluated. An owner could reach the same
+                        // state by emptying the standard and restoring it, so
+                        // this grants nothing new; it keeps the record honest.
+                        // A coordinator that is not an owner has no such path.
+                        if is_owner
+                            && op.kind == "import"
+                            && attests.is_empty()
+                            && legacy_intent(store, vs, v, op, &to_rev)?
+                        {
+                            let on_head = matches!(
+                                (&cur, to_rev.parents.first()),
+                                (Some(Pointer::Id(h)), Some(p)) if h == p
+                            );
+                            if !on_head {
+                                return Err(Error::rejected(
+                                    7,
+                                    "history",
+                                    format!("a history landing on {line} sits on the head itself"),
+                                ));
+                            }
+                            continue;
+                        }
                         let line_obj: tessra_core::object::Line = match vs.entity(v, &ls.id)? {
                             Some(p) => store.get(&p.single()?)?,
                             None => return Err(Error::rejected(7, "line", "line entity missing")),
@@ -904,6 +932,37 @@ fn check_legality<S: ObjectStore>(
         }
     }
     Ok(())
+}
+
+/// Does the revision carry a legacy intent, a git commit imported as history?
+/// The intent is usually put by the same op that lands the revision, so it
+/// is looked for among the op's own `point` effects before the parents' view.
+fn legacy_intent<S: ObjectStore>(
+    store: &S,
+    vs: &ViewState<'_, S>,
+    v: &View,
+    op: &Op,
+    rev: &Revision,
+) -> Result<bool> {
+    let Some(intent_id) = rev.intent else {
+        return Ok(false);
+    };
+    let in_op = op.effects.iter().find_map(|e| match e {
+        Effect::Point { entity, to, .. } if *entity == intent_id => Some(*to),
+        _ => None,
+    });
+    let oid = match in_op {
+        Some(id) => Some(id),
+        None => match vs.entity(v, &intent_id)? {
+            Some(Pointer::Id(id)) => Some(id),
+            _ => None,
+        },
+    };
+    let Some(oid) = oid else {
+        return Ok(false);
+    };
+    let intent: Intent = store.get(&oid)?;
+    Ok(intent.legacy == Some(true))
 }
 
 /// Every revision reachable from a line head through `parents`.
