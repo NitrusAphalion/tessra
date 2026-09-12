@@ -7,6 +7,7 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 ### Fixed
 
 - On Windows, a verifier, hook, or deployer command whose first word is a bare name is resolved through `PATH` and `PATHEXT` before it is spawned, so the detected `npm test` runs where only `npm.cmd` exists, and so do `pnpm`, `yarn`, and `npx`. The environment fingerprint names the tool behind a `cmd /c` wrapper instead of `cmd`, and records `node --version` for Node tools (#9).
+- `export --format git` fast-forwards a checkout of the branch instead of moving the ref under it, so a dirty checkout with unrelated edits receives the exported files and its index follows HEAD. When a local edit overlaps the export, or the branch holds commits trunk does not know, the export refuses before anything moves and says how to proceed (#13).
 
 ## 0.1.2 - 2026-09-10
 

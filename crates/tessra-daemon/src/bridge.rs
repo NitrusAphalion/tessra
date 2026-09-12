@@ -306,30 +306,29 @@ pub fn export_git(
         return Err(Error::verb("EXPORT", "trunk has no revisions to export"));
     };
     let refname = format!("refs/heads/{branch}");
-    // Whether the checkout of that branch is clean is judged before the ref
-    // moves under it: afterwards git reports the new commits' files as
-    // changes, and every export would leave the checkout behind.
     let current =
         git_out(&work, &[], &["rev-parse", "--abbrev-ref", "HEAD"], None).unwrap_or_default();
-    let was_clean = current == branch
-        && git_out(
-            &work,
-            &[],
-            &["status", "--porcelain", "--untracked-files=no"],
-            None,
-        )
-        .unwrap_or_default()
-        .trim()
-        .is_empty();
-    git_out(&work, &[], &["update-ref", &refname, &tip], None)?;
-    // A clean checkout of that branch follows it; a dirty one is left alone.
     let checkout = if current != branch {
+        // Nothing is checked out from the branch: the ref alone moves.
+        git_out(&work, &[], &["update-ref", &refname, &tip], None)?;
         "left alone"
-    } else if was_clean {
-        git_out(&work, &[], &["reset", "--hard", &tip], None)?;
-        "updated"
     } else {
-        "dirty, not touched"
+        // The branch is checked out: fast-forward it, so the ref, the index,
+        // and the working tree move together. Local edits to files the export
+        // did not touch stay in place; when one overlaps, or the branch holds
+        // commits trunk does not know, git refuses and nothing has moved. The
+        // ref must never move alone under a checkout: an index left behind
+        // HEAD reads as staged deletions of the files the export added.
+        if let Err(e) = git_out(&work, &[], &["merge", "--ff-only", "--quiet", &tip], None) {
+            return Err(Error::verb(
+                "EXPORT",
+                format!(
+                    "the checkout of {branch} did not fast-forward to the export, so the branch was not moved: {e}. \
+                     Commit or stash local changes that overlap the exported files, or run `import --branch {branch}` first if the branch has commits trunk does not know; then export again, or export to another branch"
+                ),
+            ));
+        }
+        "updated"
     };
     let pushed = push.map(|remote| {
         git_out(
@@ -620,13 +619,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn export_moves_the_checkout_workspace_to_the_head_it_reset_to() {
-        let (dir, mut repo) = checkout_with_one_commit();
-        let before = root_at(&repo);
-        // A change lands from a workspace of its own, so the checkout lags trunk.
+    /// Land a change that writes `content` at `path`, from a workspace of the
+    /// owner's own, so the checkout lags trunk. The workspace directory is
+    /// returned to keep it alive.
+    fn land_from_another_workspace(
+        repo: &mut Repo,
+        path: &str,
+        content: &str,
+    ) -> tempfile::TempDir {
         let wsdir = tempfile::tempdir().unwrap();
-        let (head_id, _) = crate::verbs::trunk_head_of(&repo).unwrap();
+        let (head_id, _) = crate::verbs::trunk_head_of(repo).unwrap();
         let head_rev: Revision = repo.store().get(&head_id).unwrap();
         let snap: Snapshot = repo.store().get(&head_rev.snapshots[""]).unwrap();
         crate::fs::materialize(repo.store(), &snap.root, wsdir.path(), false).unwrap();
@@ -649,12 +651,31 @@ mod tests {
         repo.workspaces.push(ws);
         let mut in_ws = repo.daemon_actor();
         in_ws.workspace = Some(ws_id);
-        std::fs::write(wsdir.path().join("d.txt"), "landed\n").unwrap();
-        let out = crate::verbs::call(&mut repo, &mut in_ws, "snapshot", &json!({ "title": "d" }));
+        std::fs::write(wsdir.path().join(path), content).unwrap();
+        let out = crate::verbs::call(repo, &mut in_ws, "snapshot", &json!({ "title": path }));
         assert_eq!(out["ok"], json!(true), "{out}");
-        let out = crate::verbs::call(&mut repo, &mut in_ws, "promote", &json!({ "to": "landed" }));
+        let out = crate::verbs::call(repo, &mut in_ws, "promote", &json!({ "to": "landed" }));
         assert_eq!(out["ok"], json!(true), "{out}");
         assert_eq!(out["result"]["stage"], json!("landed"), "{out}");
+        wsdir
+    }
+
+    fn status(dir: &Path) -> String {
+        git_out(
+            dir,
+            &[],
+            &["status", "--porcelain", "--untracked-files=no"],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn export_moves_the_checkout_workspace_to_the_head_it_reset_to() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let before = root_at(&repo);
+        // A change lands from a workspace of its own, so the checkout lags trunk.
+        let _wsdir = land_from_another_workspace(&mut repo, "d.txt", "landed\n");
         assert_eq!(root_at(&repo), before, "the checkout lags trunk");
         let out = export_git(&mut repo, "main", None, None).unwrap();
         assert_eq!(out["created"], json!(1), "{out}");
@@ -666,5 +687,59 @@ mod tests {
         // The reset checked the landed file out; git may have given it CRLF.
         let d = std::fs::read_to_string(dir.path().join("d.txt")).unwrap();
         assert_eq!(d.replace("\r\n", "\n"), "landed\n");
+    }
+
+    #[test]
+    fn export_fast_forwards_a_dirty_checkout_whose_edits_do_not_overlap() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let _wsdir = land_from_another_workspace(&mut repo, "d.txt", "landed\n");
+        // An unrelated, uncommitted edit in the checkout.
+        std::fs::write(dir.path().join("a.txt"), "one\nlocal edit\n").unwrap();
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(1), "{out}");
+        assert_eq!(out["checkout"], json!("updated"), "{out}");
+        assert_eq!(out["workspace"]["workspace"], json!("followed"), "{out}");
+        // The branch moved, the exported file arrived, and the index follows
+        // HEAD: the only difference git sees is the local edit.
+        let head = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        assert_eq!(json!(head), out["tip"], "{out}");
+        let d = std::fs::read_to_string(dir.path().join("d.txt")).unwrap();
+        assert_eq!(d.replace("\r\n", "\n"), "landed\n");
+        assert_eq!(
+            status(dir.path()),
+            "M a.txt",
+            "git_out trims the porcelain line"
+        );
+        let a = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(a.replace("\r\n", "\n"), "one\nlocal edit\n");
+    }
+
+    #[test]
+    fn export_refuses_when_a_local_edit_overlaps_the_export_and_moves_nothing() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let _wsdir = land_from_another_workspace(&mut repo, "a.txt", "one\nlanded\n");
+        std::fs::write(dir.path().join("a.txt"), "one\nlocal edit\n").unwrap();
+        let before = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        let err = export_git(&mut repo, "main", None, None).unwrap_err();
+        assert_eq!(err.code(), "EXPORT");
+        assert!(err.to_string().contains("stash"), "{err}");
+        // Nothing moved: not the branch, not the index, not the working tree.
+        let after = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            status(dir.path()),
+            "M a.txt",
+            "git_out trims the porcelain line"
+        );
+        let a = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(a.replace("\r\n", "\n"), "one\nlocal edit\n");
+        // After the edit is stashed, the same export goes through and the
+        // commits made the first time are reused.
+        git(dir.path(), &["stash", "-q"]);
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(0), "{out}");
+        assert_eq!(out["checkout"], json!("updated"), "{out}");
+        let a = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(a.replace("\r\n", "\n"), "one\nlanded\n");
     }
 }
