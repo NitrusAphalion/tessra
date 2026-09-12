@@ -441,6 +441,16 @@ fn main() {
 
 fn run() -> i32 {
     let cli = Cli::parse();
+    // Code under test does not act on the repository it is being tested
+    // for: a verifier's environment carries this variable, and this is
+    // where it stops.
+    if std::env::var_os("TESSRA_SANDBOX").is_some() {
+        print(
+            &json!({ "ok": false, "code": "SANDBOX", "message": "tessra does not act from inside a verifier run; code under test cannot reach the repository" }),
+            cli.pretty,
+        );
+        return 2;
+    }
     let start = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
 
     if let Cmd::Init {

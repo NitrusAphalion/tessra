@@ -99,6 +99,11 @@ fn call_inner(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json, limit
         )),
     };
     let state = state(repo, actor).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+    envelope(state, outcome, limit)
+}
+
+/// The response shape of VERBS.md around what a verb returned.
+fn envelope(state: Json, outcome: Result<Outcome>, limit: u64) -> Json {
     match outcome {
         Ok(Outcome { result, next }) => {
             // `used` is what the verb produced against the budget it was
@@ -474,6 +479,9 @@ pub fn state(repo: &Repo, actor: &Actor) -> Result<Json> {
     });
     if let Ok((head, seq)) = trunk_head(repo) {
         s["trunk"] = json!({ "head": head.to_hex(), "seq": seq });
+    }
+    if repo.verifying.load(std::sync::atomic::Ordering::SeqCst) {
+        s["verifying"] = json!(true);
     }
     if let Some(ws) = actor_workspace(repo, actor) {
         let (rev_id, rev) = current_revision(repo, &ws)?;
@@ -2516,7 +2524,144 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     )
 }
 
-fn verify(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
+/// What a verify is about, decided before its tools run.
+pub struct VerifyCtx {
+    rev_id: ObjectId,
+    rev: Revision,
+    conflicts: Vec<String>,
+}
+
+/// A verify the daemon carries out in two halves so a verifier's run holds
+/// no lock: what was decided with the repository, and what to run without
+/// it. `snapshot --then verify` carries the snapshot's answer as `prefix`.
+pub struct Pending {
+    ctx: VerifyCtx,
+    plan: VerifierPlan,
+    prefix: Option<Json>,
+    limit: u64,
+}
+
+impl Pending {
+    pub fn runs(&self) -> &[PlannedRun] {
+        &self.plan.runs
+    }
+}
+
+pub enum Split {
+    Done(Json),
+    Pending(Box<Pending>),
+}
+
+/// Like `call`, but a `verify`, or a `snapshot --then verify`, whose tools
+/// have to run comes back pending: the caller runs `Pending::runs` with
+/// the repository released and finishes with `finish_pending`.
+pub fn call_split(repo: &mut Repo, actor: &mut Actor, verb: &str, args: &Json) -> Split {
+    let limit = args.get("budget").and_then(Json::as_u64).unwrap_or(4000);
+    let then_verify = verb == "snapshot" && arg_str(args, "then") == Some("verify");
+    if verb != "verify" && !then_verify {
+        return Split::Done(call(repo, actor, verb, args));
+    }
+    let mut prefix = None;
+    if then_verify {
+        let mut without = args.clone();
+        if let Some(o) = without.as_object_mut() {
+            o.remove("then");
+        }
+        let out = call(repo, actor, "snapshot", &without);
+        if out.get("ok") != Some(&json!(true)) {
+            return Split::Done(out);
+        }
+        prefix = Some(out);
+    }
+    repo.store().begin_batch();
+    let prepared = verify_prepare(repo, actor, args);
+    if let Err(e) = repo.store().end_batch() {
+        return Split::Done(json!({ "ok": false, "code": "STORE", "message": e.to_string() }));
+    }
+    match prepared {
+        Err(e) => {
+            let st = state(repo, actor).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+            Split::Done(envelope(st, Err(e), limit))
+        }
+        Ok((ctx, plan)) if plan.runs.is_empty() => {
+            let pending = Pending {
+                ctx,
+                plan,
+                prefix,
+                limit,
+            };
+            Split::Done(finish_pending(repo, actor, pending, Vec::new()))
+        }
+        Ok((ctx, plan)) => Split::Pending(Box::new(Pending {
+            ctx,
+            plan,
+            prefix,
+            limit,
+        })),
+    }
+}
+
+/// The second half: record what the runs did, evaluate the standard, and
+/// answer as `call` would have.
+pub fn finish_pending(
+    repo: &mut Repo,
+    actor: &mut Actor,
+    pending: Pending,
+    outcomes: Vec<Result<crate::verifiers::RunOutcome>>,
+) -> Json {
+    repo.store().begin_batch();
+    let Pending {
+        ctx,
+        plan,
+        prefix,
+        limit,
+    } = pending;
+    let mut ran = plan.ran;
+    let mut failed: Option<Error> = None;
+    for (run, out) in plan.runs.iter().zip(outcomes) {
+        match out.and_then(|o| record_verifier_run(repo, run, o)) {
+            Ok(j) => ran.push(j),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    for d in &plan.cleanup {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    let outcome = match failed {
+        Some(e) => Err(e),
+        None => verify_complete(repo, ctx, ran),
+    };
+    if let Err(e) = repo.store().end_batch() {
+        return json!({ "ok": false, "code": "STORE", "message": e.to_string() });
+    }
+    let st = state(repo, actor).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+    let out = envelope(st, outcome, limit);
+    match prefix {
+        None => out,
+        Some(mut snap) => {
+            // The compound form answers as the snapshot did, with the
+            // verify's result inside it and the state as it is now.
+            if out.get("ok") == Some(&json!(true)) {
+                snap["result"]["verify"] = out["result"].clone();
+                snap["next"] = json!(["promote --to proposed"]);
+                snap["state"] = out["state"].clone();
+                snap
+            } else {
+                out
+            }
+        }
+    }
+}
+
+/// The first half of a verify: what to run.
+fn verify_prepare(
+    repo: &mut Repo,
+    actor: &mut Actor,
+    args: &Json,
+) -> Result<(VerifyCtx, VerifierPlan)> {
     let ws = require_workspace(repo, actor)?;
     let (rev_id, rev) = current_revision(repo, &ws)?;
     let conflicts = conflicted_paths(repo, &rev)?;
@@ -2530,11 +2675,38 @@ fn verify(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 .collect()
         })
         .unwrap_or_default();
-    let ran = if conflicts.is_empty() {
-        run_verifiers(repo, &rev_id, &rev, full, &only)?
+    let plan = if conflicts.is_empty() {
+        plan_verifier_runs(repo, &rev_id, &rev, full, &only)?
     } else {
-        Vec::new()
+        VerifierPlan {
+            runs: Vec::new(),
+            ran: Vec::new(),
+            cleanup: Vec::new(),
+        }
     };
+    Ok((
+        VerifyCtx {
+            rev_id,
+            rev,
+            conflicts,
+        },
+        plan,
+    ))
+}
+
+fn verify(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
+    let (ctx, plan) = verify_prepare(repo, actor, args)?;
+    let ran = run_plan_inline(repo, plan)?;
+    verify_complete(repo, ctx, ran)
+}
+
+/// The second half of a verify: the standard against what ran.
+fn verify_complete(repo: &mut Repo, ctx: VerifyCtx, ran: Vec<Json>) -> Result<Outcome> {
+    let VerifyCtx {
+        rev_id,
+        rev,
+        conflicts,
+    } = ctx;
     let (_, risk) = crate::risk::ensure_attested(repo, &rev_id, &rev)?;
     let (met, mut unmet, attests) = standard_status(repo, &rev_id, &rev)?;
     let request = ensure_approval_request(repo, &rev_id, &rev, &unmet)?;
@@ -2577,6 +2749,8 @@ pub fn run_verifiers_for(
 /// `attest` clause that is unmet, or every one when `full`. Whole-suite
 /// results attest the snapshot; a run selected by the covering-tests
 /// relation attests the changed units and the tests that ran, by body.
+/// This runs each tool inline; the daemon plans, runs with the repository
+/// released, and records, through the halves below.
 fn run_verifiers(
     repo: &mut Repo,
     rev_id: &ObjectId,
@@ -2584,6 +2758,79 @@ fn run_verifiers(
     full: bool,
     only: &[String],
 ) -> Result<Vec<Json>> {
+    let plan = plan_verifier_runs(repo, rev_id, rev, full, only)?;
+    run_plan_inline(repo, plan)
+}
+
+/// Carry out a plan here and now: each run, then its record.
+fn run_plan_inline(repo: &mut Repo, plan: VerifierPlan) -> Result<Vec<Json>> {
+    let mut ran = plan.ran;
+    let mut failed: Option<Error> = None;
+    for run in &plan.runs {
+        match crate::verifiers::run_planned(run).and_then(|o| record_verifier_run(repo, run, o)) {
+            Ok(j) => ran.push(j),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    for d in &plan.cleanup {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(ran),
+    }
+}
+
+/// One verifier run: decided with the repository, carried out without it,
+/// recorded with it again.
+pub struct PlannedRun {
+    pub kind: String,
+    pub tool: crate::verifiers::Verifier,
+    pub dir: PathBuf,
+    pub select: Vec<String>,
+    pub timeout: std::time::Duration,
+    pub env: crate::verifiers::RunEnv,
+    env_id: ObjectId,
+    verifier: EntityId,
+    how: RunHow,
+}
+
+enum RunHow {
+    /// New tests laid into the parent's text: they prove the change when
+    /// they fail there.
+    NewTests {
+        names: Vec<String>,
+        paths: Vec<String>,
+        bodies: Vec<ObjectId>,
+    },
+    /// The suite, or the tests covering what changed.
+    Suite {
+        snap_id: ObjectId,
+        selected: Vec<String>,
+        selected_bodies: Vec<ObjectId>,
+    },
+}
+
+/// The runs a verify needs, the entries for what it did not need to run,
+/// and the scratch directories to remove once the runs are done.
+pub struct VerifierPlan {
+    pub runs: Vec<PlannedRun>,
+    pub ran: Vec<Json>,
+    pub cleanup: Vec<PathBuf>,
+}
+
+/// Decide the runs: which kinds still need proof, which tool proves each,
+/// and a scratch copy of what it runs on. Nothing here waits on a tool.
+fn plan_verifier_runs(
+    repo: &mut Repo,
+    rev_id: &ObjectId,
+    rev: &Revision,
+    full: bool,
+    only: &[String],
+) -> Result<VerifierPlan> {
     use crate::verifiers::{self as vf, Filter};
     use std::time::Duration;
     let (snap_id, snap) = root_snapshot(repo, rev)?;
@@ -2622,6 +2869,8 @@ fn run_verifiers(
     let ws_dir = actor_dir_for(repo, rev)?;
     let verifiers = vf::verifiers_for(repo, &ws_dir);
     let mut ran = Vec::new();
+    let mut runs: Vec<PlannedRun> = Vec::new();
+    let mut cleanup: Vec<PathBuf> = Vec::new();
     for (kind, scope) in required {
         if !only.is_empty() && !only.contains(&kind) {
             continue;
@@ -2718,52 +2967,22 @@ fn run_verifiers(
                     std::fs::write(full_path, merged)?;
                 }
                 let names: Vec<String> = new_tests.iter().map(|n| n.name.clone()).collect();
-                let out = vf::run(repo, &tool, &dir, &names, timeout)?;
-                let _ = std::fs::remove_dir_all(&dir);
-                // A test proves the change only when it is seen failing on
-                // the parent. A clean exit with nothing parsed means every
-                // selected test passed there.
-                let passed_on_parent: Vec<String> = if out.ok && out.tests.is_empty() {
-                    names.clone()
-                } else {
-                    names
-                        .iter()
-                        .filter(|n| {
-                            out.tests
-                                .iter()
-                                .any(|(t, okk)| *okk && vf::test_matches(t, n))
-                        })
-                        .cloned()
-                        .collect()
-                };
-                let proves = passed_on_parent.is_empty();
-                let scope_map = BTreeMap::from([
-                    ("tests".to_string(), vf::text_list(&names)),
-                    (
-                        "passed_on_parent".to_string(),
-                        vf::text_list(&passed_on_parent),
-                    ),
-                    (
-                        "paths".to_string(),
-                        vf::text_list(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>()),
-                    ),
-                ]);
-                let att = vf::attest_as_runner(
-                    repo,
-                    &kind,
-                    None,
-                    Some(new_tests.iter().map(|n| n.body).collect()),
-                    Some(scope_map),
-                    Cbor::Bool(proves),
-                    Some(env_id),
+                cleanup.push(dir.clone());
+                runs.push(PlannedRun {
+                    kind,
+                    tool: tool.clone(),
+                    dir,
+                    select: names.clone(),
+                    timeout,
+                    env: vf::run_env(repo),
+                    env_id,
                     verifier,
-                    Some(&out.output),
-                )?;
-                ran.push(json!({
-                    "kind": kind, "cached": false, "result": proves, "tests": names,
-                    "passed_on_parent": passed_on_parent, "elapsed_ms": out.elapsed_ms, "attestation": att.to_hex(),
-                    "how": if proves { "every new test fails on the parent snapshot" } else { "a new test passes on the parent too, so it does not prove the change" },
-                }));
+                    how: RunHow::NewTests {
+                        names,
+                        paths: paths.iter().map(|p| p.to_string()).collect(),
+                        bodies: new_tests.iter().map(|n| n.body).collect(),
+                    },
+                });
             }
             _ => {
                 // Select by the covering-tests relation when every changed
@@ -2837,72 +3056,175 @@ fn run_verifiers(
                         }
                     }
                 }
-                let dir = vf::materialize_scratch(repo, &snap.root, &snap_id.to_hex()[..12])?;
-                let out = vf::run(repo, &tool, &dir, &selected, timeout)?;
-                let _ = std::fs::remove_dir_all(&dir);
-                let passed = out.tests.iter().filter(|(_, okk)| *okk).count();
-                let failed = out.tests.iter().filter(|(_, okk)| !*okk).count();
-                let mut scope_map = BTreeMap::from([
-                    ("passed".to_string(), Cbor::Integer((passed as u64).into())),
-                    ("failed".to_string(), Cbor::Integer((failed as u64).into())),
-                    ("selected".to_string(), Cbor::Bool(!selected.is_empty())),
-                    (
-                        "elapsed_ms".to_string(),
-                        Cbor::Integer(out.elapsed_ms.into()),
-                    ),
-                ]);
-                let ran_names: Vec<String> = out.tests.iter().map(|(t, _)| t.clone()).collect();
-                scope_map.insert("tests".to_string(), vf::text_list(&ran_names));
-                let failed_names: Vec<String> = out
-                    .tests
+                // One scratch copy of the snapshot serves every kind that
+                // runs on it; it is removed when the runs are done.
+                let label = snap_id.to_hex()[..12].to_string();
+                let dir = match cleanup
                     .iter()
-                    .filter(|(_, okk)| !*okk)
-                    .map(|(t, _)| t.clone())
-                    .collect();
-                scope_map.insert("failed".to_string(), vf::text_list(&failed_names));
-                scope_map.insert(
-                    "exit".to_string(),
-                    Cbor::Integer(i64::from(out.exit.unwrap_or(-1)).into()),
-                );
-                let (subject, bodies) = if selected.is_empty() {
-                    (Some((snap_id.as_bytes().as_slice(), "snapshot")), None)
-                } else {
-                    (None, Some(selected_bodies))
+                    .find(|d| d.ends_with(format!("verify-{label}")))
+                {
+                    Some(d) => d.clone(),
+                    None => {
+                        let d = vf::materialize_scratch(repo, &snap.root, &label)?;
+                        cleanup.push(d.clone());
+                        d
+                    }
                 };
-                let att = vf::attest_as_runner(
-                    repo,
-                    &kind,
-                    subject,
-                    bodies,
-                    Some(scope_map),
-                    Cbor::Bool(out.ok),
-                    Some(env_id),
+                runs.push(PlannedRun {
+                    kind,
+                    tool: tool.clone(),
+                    dir,
+                    select: selected.clone(),
+                    timeout,
+                    env: vf::run_env(repo),
+                    env_id,
                     verifier,
-                    Some(&out.output),
-                )?;
-                let evidence = repo
-                    .store()
-                    .get::<tessra_core::object::Attestation>(&att)?
-                    .evidence
-                    .map(|e| e.to_hex());
-                let mut entry = json!({
-                    "kind": kind, "cached": false, "result": out.ok, "exit": out.exit, "timed_out": out.timed_out,
-                    "selected": if selected.is_empty() { json!("all") } else { json!(selected) },
-                    "passed": passed, "failed": failed,
-                    "failed_tests": out.tests.iter().filter(|(_, okk)| !*okk).map(|(t, _)| t.clone()).collect::<Vec<_>>(),
-                    "elapsed_ms": out.elapsed_ms, "attestation": att.to_hex(), "evidence": evidence,
+                    how: RunHow::Suite {
+                        snap_id,
+                        selected,
+                        selected_bodies,
+                    },
                 });
-                // A failed run carries the end of its output, where every
-                // runner puts its summary and errors; the evidence blob holds
-                // the last 64 KiB for `query --kind object --tail`.
-                if !out.ok {
-                    entry["output_tail"] = json!(vf::tail_text(&out.output, 2000));
-                }
-                ran.push(entry);
             }
         }
     }
-    Ok(ran)
+    Ok(VerifierPlan { runs, ran, cleanup })
+}
+
+/// Record what a run showed: the attestation, signed by the daemon as
+/// runner, and the entry the caller sees.
+fn record_verifier_run(
+    repo: &mut Repo,
+    run: &PlannedRun,
+    out: crate::verifiers::RunOutcome,
+) -> Result<Json> {
+    use crate::verifiers as vf;
+    let kind = &run.kind;
+    match &run.how {
+        RunHow::NewTests {
+            names,
+            paths,
+            bodies,
+        } => {
+            // A test proves the change only when it is seen failing on the
+            // parent. A clean exit with nothing parsed means every selected
+            // test passed there; a run that could not report the tests at
+            // all, a build error on the parent for instance, is taken as
+            // failing there and said so.
+            let passed_on_parent: Vec<String> = if out.ok && out.tests.is_empty() {
+                names.clone()
+            } else {
+                names
+                    .iter()
+                    .filter(|n| {
+                        out.tests
+                            .iter()
+                            .any(|(t, okk)| *okk && vf::test_matches(t, n))
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let observed = !out.tests.is_empty();
+            let proves = passed_on_parent.is_empty();
+            let scope_map = BTreeMap::from([
+                ("tests".to_string(), vf::text_list(names)),
+                (
+                    "passed_on_parent".to_string(),
+                    vf::text_list(&passed_on_parent),
+                ),
+                ("paths".to_string(), vf::text_list(paths)),
+                ("observed".to_string(), Cbor::Bool(observed)),
+            ]);
+            let att = vf::attest_as_runner(
+                repo,
+                kind,
+                None,
+                Some(bodies.clone()),
+                Some(scope_map),
+                Cbor::Bool(proves),
+                Some(run.env_id),
+                run.verifier,
+                Some(&out.output),
+            )?;
+            Ok(json!({
+                "kind": kind, "cached": false, "result": proves, "tests": names,
+                "passed_on_parent": passed_on_parent, "observed": observed,
+                "elapsed_ms": out.elapsed_ms, "attestation": att.to_hex(),
+                "how": if !proves {
+                    "a new test passes on the parent too, so it does not prove the change"
+                } else if observed {
+                    "every new test fails on the parent snapshot"
+                } else {
+                    "the parent could not run the new tests at all (a build error, or a tool that reports nothing), which is taken as failing there"
+                },
+            }))
+        }
+        RunHow::Suite {
+            snap_id,
+            selected,
+            selected_bodies,
+        } => {
+            let passed = out.tests.iter().filter(|(_, okk)| *okk).count();
+            let failed = out.tests.iter().filter(|(_, okk)| !*okk).count();
+            let mut scope_map = BTreeMap::from([
+                ("passed".to_string(), Cbor::Integer((passed as u64).into())),
+                ("failed".to_string(), Cbor::Integer((failed as u64).into())),
+                ("selected".to_string(), Cbor::Bool(!selected.is_empty())),
+                (
+                    "elapsed_ms".to_string(),
+                    Cbor::Integer(out.elapsed_ms.into()),
+                ),
+            ]);
+            let ran_names: Vec<String> = out.tests.iter().map(|(t, _)| t.clone()).collect();
+            scope_map.insert("tests".to_string(), vf::text_list(&ran_names));
+            let failed_names: Vec<String> = out
+                .tests
+                .iter()
+                .filter(|(_, okk)| !*okk)
+                .map(|(t, _)| t.clone())
+                .collect();
+            scope_map.insert("failed".to_string(), vf::text_list(&failed_names));
+            scope_map.insert(
+                "exit".to_string(),
+                Cbor::Integer(i64::from(out.exit.unwrap_or(-1)).into()),
+            );
+            let (subject, bodies) = if selected.is_empty() {
+                (Some((snap_id.as_bytes().as_slice(), "snapshot")), None)
+            } else {
+                (None, Some(selected_bodies.clone()))
+            };
+            let att = vf::attest_as_runner(
+                repo,
+                kind,
+                subject,
+                bodies,
+                Some(scope_map),
+                Cbor::Bool(out.ok),
+                Some(run.env_id),
+                run.verifier,
+                Some(&out.output),
+            )?;
+            let evidence = repo
+                .store()
+                .get::<tessra_core::object::Attestation>(&att)?
+                .evidence
+                .map(|e| e.to_hex());
+            let mut entry = json!({
+                "kind": kind, "cached": false, "result": out.ok, "exit": out.exit, "timed_out": out.timed_out,
+                "selected": if selected.is_empty() { json!("all") } else { json!(selected) },
+                "passed": passed, "failed": failed,
+                "failed_tests": failed_names,
+                "elapsed_ms": out.elapsed_ms, "attestation": att.to_hex(), "evidence": evidence,
+            });
+            // A failed run carries the end of its output, where every
+            // runner puts its summary and errors; the evidence blob holds
+            // the last 64 KiB for `query --kind object --tail`.
+            if !out.ok {
+                entry["output_tail"] = json!(vf::tail_text(&out.output, 2000));
+            }
+            Ok(entry)
+        }
+    }
 }
 
 /// A directory whose files describe the revision, for verifier detection:

@@ -62,8 +62,6 @@ impl Endpoint {
 
 struct Shared {
     repo: Mutex<Repo>,
-    /// The repository's verifying flag, readable without its lock.
-    verifying: Arc<AtomicBool>,
     sessions: Mutex<HashMap<String, Actor>>,
     last_activity: AtomicU64,
     stop: AtomicBool,
@@ -85,10 +83,8 @@ pub fn serve(repo: Repo, idle: Duration) -> std::io::Result<()> {
     std::fs::write(&staging, format!("{port}\n{token}\n{pid}\n"))?;
     std::fs::rename(&staging, &endpoint_path)?;
 
-    let verifying = Arc::clone(&repo.verifying);
     let shared = Arc::new(Shared {
         repo: Mutex::new(repo),
-        verifying,
         sessions: Mutex::new(HashMap::new()),
         last_activity: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -185,15 +181,6 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
     if req.verb == "ping" {
         return json!({ "ok": true, "result": { "pid": std::process::id(), "uptime_s": shared.started.elapsed().as_secs() } });
     }
-    // While a verifier runs, the repository is busy and nothing the code
-    // under test does can reach it. Other callers retry.
-    if shared.verifying.load(Ordering::SeqCst) {
-        return json!({
-            "ok": false,
-            "code": "BUSY",
-            "message": "a verifier is running in this repository; code under test may not act, and other callers should retry in a moment",
-        });
-    }
     let mut repo = shared.repo.lock().unwrap();
     let mut actor = match (&req.principal, &req.agent) {
         (Some(name), _) => match repo.open_external(name, req.credential.as_deref()) {
@@ -271,7 +258,22 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
             .find(|w| w.id.matches_prefix(prefix))
             .map(|w| w.id);
     }
-    let out = verbs::call(&mut repo, &mut actor, &req.verb, &req.args);
+    let out = match verbs::call_split(&mut repo, &mut actor, &req.verb, &req.args) {
+        verbs::Split::Done(out) => out,
+        verbs::Split::Pending(pending) => {
+            // The tools run with the repository released, so every other
+            // caller keeps working while they do; code under test is kept
+            // off the repository by its environment, not by a closed door.
+            drop(repo);
+            let outcomes: Vec<crate::Result<crate::verifiers::RunOutcome>> = pending
+                .runs()
+                .iter()
+                .map(crate::verifiers::run_planned)
+                .collect();
+            repo = shared.repo.lock().unwrap();
+            verbs::finish_pending(&mut repo, &mut actor, *pending, outcomes)
+        }
+    };
     // Remember a workspace the session created, so later calls without an
     // explicit workspace keep using it, here and across a restart.
     let _ = repo.remember_session_workspace(&actor);
@@ -362,6 +364,108 @@ mod tests {
         assert_eq!(out["ok"], Value::Bool(true));
         handle.join().unwrap().unwrap();
         assert!(!tessra_dir.join("daemon").exists());
+    }
+
+    #[test]
+    fn verify_runs_its_tool_with_the_repository_released() {
+        let dir = crate::paths::ScratchDir::new();
+        let mut repo = Repo::init(
+            dir.path(),
+            InitOptions {
+                name: "t".into(),
+                import_git: false,
+                history: 1,
+                data_dir: Some(dir.data_dir()),
+            },
+        )
+        .unwrap();
+        let mut owner = repo.owner_actor();
+        // A verifier that takes a couple of seconds and passes wherever the
+        // tests run at all.
+        let slow = if cfg!(windows) {
+            "verifiers.tests.pass=cmd /c ping -n 3 127.0.0.1"
+        } else {
+            "verifiers.tests.pass=sleep 2"
+        };
+        let out = verbs::call(&mut repo, &mut owner, "config", &json!({ "set": [slow] }));
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        let out = verbs::call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "require": ["attest(tests.pass)"] }),
+        );
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        let out = verbs::call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "a.txt", "content": "one" }),
+        );
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        let out = verbs::call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        let owner_secret = std::fs::read_to_string(repo.owner_credential_path())
+            .unwrap()
+            .trim()
+            .to_string();
+        let tessra_dir = repo.tessra_dir.clone();
+        let handle = std::thread::spawn(move || serve(repo, Duration::from_secs(60)));
+        let mut endpoint = None;
+        for _ in 0..100 {
+            if let Some(e) = Endpoint::read(&tessra_dir) {
+                endpoint = Some(e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let endpoint = endpoint.expect("daemon endpoint");
+        let base = Request {
+            token: endpoint.token.clone(),
+            agent: None,
+            model: None,
+            write: vec![],
+            workspace: None,
+            principal: None,
+            credential: Some(owner_secret),
+            verb: "verify".into(),
+            args: json!({}),
+        };
+        let (e2, b2) = (endpoint.clone(), base.clone());
+        let verifying = std::thread::spawn(move || client::call(&e2, &b2).unwrap());
+        std::thread::sleep(Duration::from_millis(500));
+        // While the tool runs, another caller is answered at once, and told.
+        let started = Instant::now();
+        let status = client::call(
+            &endpoint,
+            &Request {
+                verb: "status".into(),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        let waited = started.elapsed();
+        assert_eq!(status["ok"], Value::Bool(true), "{status}");
+        assert_eq!(status["state"]["verifying"], json!(true), "{status}");
+        assert!(
+            waited < Duration::from_millis(1500),
+            "status waited on the verifier: {waited:?}"
+        );
+        let out = verifying.join().unwrap();
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        assert_eq!(out["result"]["ran"][0]["result"], json!(true), "{out}");
+        assert_eq!(out["result"]["unmet"], json!([]), "{out}");
+        let stop = Request {
+            verb: "shutdown".into(),
+            ..base
+        };
+        client::call(&endpoint, &stop).unwrap();
+        handle.join().unwrap().unwrap();
     }
 
     #[test]

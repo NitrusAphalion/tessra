@@ -13,6 +13,8 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 ### Changed
 
 - The declared minimum Rust is 1.90, which the locked dependencies (tree-sitter 0.27) need; the README said 1.80, which could not build the workspace.
+- A verifier runs with the repository released: the daemon decides the runs with the repository, carries them out with it unlocked, and records the attestations with it again, so a `verify` (or `snapshot --then verify`) no longer holds every other agent for the length of a test suite. The `BUSY` answer to every request during a run is gone; instead the `tessra` command refuses to act when `TESSRA_SANDBOX` is in its environment, which every verifier run sets, and `status` reports `verifying` while a run is on. A `tests.fail_on_parent` entry says when the parent could not run the new tests at all.
+- The landed set and the standard's status are remembered between ops, so a `status` between landings is a lookup instead of a walk over every landed revision and every attestation.
 - `status` lists what happened since the cursor newest first, cut to half its budget, each entry saying what the op did (the change's title, the memory's kind and body, the landing's number) and who did it by name; `since_omitted` counts the rest and `cursor` is what to pass next time. It used to return every op since init, each as hashes.
 - `budget.used` is what the verb produced against its budget, and a new `budget.total` is the whole answer including the state echo, so the cost of a call is never hidden.
 - Every query kind is cut to its budget and says what it left out: `revision`, `since`, `exceptions`, `trusted`, `workspace --action list`, and the uncovered list of `tests`; `blame` and `tests` charge entries by their real size.

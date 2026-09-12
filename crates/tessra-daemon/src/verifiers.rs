@@ -401,11 +401,10 @@ pub fn ensure_verifier(repo: &mut Repo, name: &str) -> Result<EntityId> {
     Ok(id)
 }
 
-/// Set on the repository while one of its verifiers runs. The daemon
-/// refuses requests for that repository meanwhile, so code under test
-/// cannot act through it, and callers know to retry. The flag is per
-/// repository, not per process: a daemon serving another repository in
-/// the same process, or a test beside a test, is not busy.
+/// Set on the repository while one of its verifiers runs, so a status
+/// can say so. Code under test is kept off the repository by the
+/// `TESSRA_SANDBOX` variable in its environment, which the `tessra` command
+/// refuses to act under, not by refusing every other caller.
 struct VerifyingGuard(Arc<AtomicBool>);
 
 impl VerifyingGuard {
@@ -441,10 +440,44 @@ pub struct RunOutcome {
     pub output: Vec<u8>,
 }
 
+/// What a run needs from the repository, carried without holding it: the
+/// build cache is per repository, and the verifying flag is what a status
+/// reports while the run is on.
+#[derive(Clone)]
+pub struct RunEnv {
+    pub repo_id: EntityId,
+    pub verifying: Arc<AtomicBool>,
+}
+
+pub fn run_env(repo: &Repo) -> RunEnv {
+    RunEnv {
+        repo_id: repo.repo_id,
+        verifying: Arc::clone(&repo.verifying),
+    }
+}
+
 /// Run a verifier in `dir` with a stripped environment and a timeout.
 /// `select` names tests to run; empty means the whole suite.
 pub fn run(
     repo: &Repo,
+    v: &Verifier,
+    dir: &Path,
+    select: &[String],
+    timeout: Duration,
+) -> Result<RunOutcome> {
+    run_in(&run_env(repo), v, dir, select, timeout)
+}
+
+/// Carry out a planned run: the tool, the directory, and the selection the
+/// plan decided, with nothing from the repository, which is how the daemon
+/// runs it with the repository unlocked.
+pub fn run_planned(run: &crate::verbs::PlannedRun) -> Result<RunOutcome> {
+    run_in(&run.env, &run.tool, &run.dir, &run.select, run.timeout)
+}
+
+/// `run` without the repository.
+pub fn run_in(
+    env: &RunEnv,
     v: &Verifier,
     dir: &Path,
     select: &[String],
@@ -515,7 +548,7 @@ pub fn run(
     if v.argv.first().map(String::as_str) == Some("cargo") {
         cmd.env(
             "CARGO_TARGET_DIR",
-            paths::workspaces_dir_for(&repo.repo_id).join("verify-target"),
+            paths::workspaces_dir_for(&env.repo_id).join("verify-target"),
         );
         cmd.env("CARGO_TERM_COLOR", "never");
     }
@@ -523,7 +556,7 @@ pub fn run(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.env("TESSRA_SANDBOX", "1");
-    let _guard = VerifyingGuard::enter(&repo.verifying);
+    let _guard = VerifyingGuard::enter(&env.verifying);
     let start = Instant::now();
     let mut child = cmd
         .spawn()
