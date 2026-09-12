@@ -410,6 +410,61 @@ fn classify<'t>(lang: Language, node: TsNode<'t>, source: &[u8]) -> Class<'t> {
                 }
             }
             "empty_statement" => Class::Skip,
+            "expression_statement" => {
+                // `test("adds", () => ...)`, `it(...)`, and `describe(...)`
+                // blocks are the tests of a JavaScript file: units of their
+                // own kind named by their title, so the covering-tests
+                // relation and the test-change guards see them, and a
+                // whole `describe` counts as one test over what it names.
+                let call = node
+                    .named_child(0)
+                    .filter(|c| c.kind() == "call_expression");
+                match call {
+                    Some(call) => {
+                        let callee = field_text(call, "function", source).unwrap_or_default();
+                        let base = callee.trim_end_matches(".only");
+                        let skipped = matches!(base, "xit" | "xtest" | "xdescribe")
+                            || base.ends_with(".skip")
+                            || base.ends_with(".todo");
+                        let is_test_call = skipped || matches!(base, "test" | "it" | "describe");
+                        if is_test_call {
+                            let title = call
+                                .child_by_field_name("arguments")
+                                .and_then(|a| a.named_child(0))
+                                .filter(|s| s.kind() == "string" || s.kind() == "template_string")
+                                .map(|s| {
+                                    one_line(
+                                        text(s, source)
+                                            .trim_matches(|c| c == '"' || c == '\'' || c == '`'),
+                                    )
+                                })
+                                .unwrap_or_else(|| one_line(&callee));
+                            Class::Unit {
+                                kind: if skipped { "test.skipped" } else { "test" },
+                                name: title,
+                                setlike: false,
+                                body: None,
+                                children_setlike: false,
+                            }
+                        } else {
+                            Class::Unit {
+                                kind: "statement",
+                                name: String::new(),
+                                setlike: false,
+                                body: None,
+                                children_setlike: false,
+                            }
+                        }
+                    }
+                    None => Class::Unit {
+                        kind: "statement",
+                        name: String::new(),
+                        setlike: false,
+                        body: None,
+                        children_setlike: false,
+                    },
+                }
+            }
             _ => Class::Unit {
                 kind: "statement",
                 name: String::new(),
@@ -619,10 +674,14 @@ fn collect(
                 let item_from = toks.len();
                 tokens(lang, child, source, &mut toks, &mut raw_refs);
                 drop_own_name(&mut toks, item_from, name.as_bytes());
+                // A unit does not reference itself, except that a test
+                // titled after what it tests (`describe('sign', ...)`) does
+                // reference `sign`, and the covering relation needs it.
+                let titled_test = kind == "test" || kind == "test.skipped";
                 let mut refs: Vec<String> = raw_refs
                     .into_iter()
                     .filter_map(|r| std::str::from_utf8(r).ok())
-                    .filter(|r| *r != name && crate::rename::is_ident(r))
+                    .filter(|r| (titled_test || *r != name) && crate::rename::is_ident(r))
                     .map(str::to_string)
                     .collect();
                 refs.sort();
@@ -756,6 +815,26 @@ impl Point {
         );
         let skipped = with_grammar(Language::Rust, b"#[test]\n#[ignore]\nfn later() {}\n").unwrap();
         assert_eq!(skipped[0].kind, "test.skipped");
+        // JavaScript tests are call statements named by their title.
+        let js = with_grammar(
+            Language::JavaScript,
+            b"import { add } from './add';\ntest('adds two', () => { expect(add(1, 2)).toBe(3); });\nit.skip('later', () => {});\ndescribe('a suite', () => { it('inner', () => {}); });\nconsole.log('not a test');\n",
+        )
+        .unwrap();
+        let kinds: Vec<(&str, &str)> = js
+            .iter()
+            .map(|n| (n.kind.as_str(), n.name.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("import", "import { add } from './add';"),
+                ("test", "adds two"),
+                ("test.skipped", "later"),
+                ("test", "a suite"),
+                ("statement", ""),
+            ]
+        );
         let point = nodes
             .iter()
             .position(|n| n.kind == "struct" && n.name == "Point")

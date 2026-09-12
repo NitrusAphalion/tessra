@@ -189,8 +189,9 @@ enum Cmd {
     Remember {
         #[arg(long, default_value = "fact")]
         kind: String,
+        /// The memory. Not needed with --retire.
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         #[arg(long, default_value = "repo")]
         scope_kind: String,
         #[arg(long, default_value = "")]
@@ -199,6 +200,12 @@ enum Cmd {
         confidence: f64,
         #[arg(long, default_value = "shared")]
         visibility: String,
+        /// An earlier memory this one replaces; it is retired in the same op.
+        #[arg(long)]
+        supersedes: Option<String>,
+        /// Take a memory back by its ID prefix (its author or the owner).
+        #[arg(long)]
+        retire: Option<String>,
     },
     /// Run the verifiers the standard still needs and report it clause by clause.
     Verify {
@@ -749,9 +756,11 @@ fn to_call(cmd: &Cmd) -> (&'static str, Value) {
             scope_ref,
             confidence,
             visibility,
+            supersedes,
+            retire,
         } => (
             "remember",
-            json!({ "kind": kind, "body": body, "scope": { "kind": scope_kind, "ref": scope_ref }, "confidence": confidence, "visibility": visibility }),
+            json!({ "kind": kind, "body": body, "scope": { "kind": scope_kind, "ref": scope_ref }, "confidence": confidence, "visibility": visibility, "supersedes": supersedes, "retire": retire }),
         ),
         Cmd::Verify { kinds, full } => ("verify", json!({ "kinds": kinds, "full": full })),
         Cmd::Standard {

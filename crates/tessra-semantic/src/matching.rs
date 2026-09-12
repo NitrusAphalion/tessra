@@ -46,7 +46,9 @@ pub fn assign_ids_with_refs(
     let mut nodes = assign_only(path, raw, previous, previous_source);
     let mut by_name: HashMap<&str, Vec<EntityId>> = HashMap::new();
     for n in &nodes {
-        if is_ident(&n.name) {
+        // A test is never what code refers to, and a test titled after
+        // what it tests must not capture that name.
+        if is_ident(&n.name) && n.kind != "test" && n.kind != "test.skipped" {
             by_name.entry(n.name.as_str()).or_default().push(n.nid);
         }
     }

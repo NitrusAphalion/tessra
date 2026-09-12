@@ -587,6 +587,131 @@ fn memory_json(id: &EntityId, m: &Memory) -> Json {
     })
 }
 
+/// What the memories a call lists are anchored to, resolved once against
+/// the caller's revision: a unit's body hash, or a file's blob.
+struct Anchors<'a> {
+    repo: &'a Repo,
+    rev: Option<Revision>,
+    idx: Option<tessra_core::object::NodeIndex>,
+    flat: Option<Flat>,
+    loaded: bool,
+}
+
+impl<'a> Anchors<'a> {
+    fn new(repo: &'a Repo, actor: &Actor) -> Self {
+        let rev = match actor_workspace(repo, actor) {
+            Some(ws) => current_revision(repo, &ws).ok().map(|(_, r)| r),
+            None => trunk_head(repo)
+                .ok()
+                .and_then(|(h, _)| repo.store().get::<Revision>(&h).ok()),
+        };
+        Anchors {
+            repo,
+            rev,
+            idx: None,
+            flat: None,
+            loaded: false,
+        }
+    }
+
+    fn load(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.loaded = true;
+        if let Some(rev) = &self.rev {
+            if let Ok((snap_id, snap)) = root_snapshot(self.repo, rev) {
+                self.idx = crate::semantic::index_for_snapshot(self.repo.store(), &snap_id)
+                    .ok()
+                    .map(|(_, i)| i);
+                self.flat = tree::flatten(self.repo.store(), &snap.root).ok();
+            }
+        }
+    }
+
+    /// The content a scope names now, if it is still there.
+    fn current(&mut self, kind: &str, r: &Cbor) -> Option<ObjectId> {
+        let Cbor::Text(r) = r else { return None };
+        self.load();
+        match kind {
+            "node" => {
+                let (path, name) = r.split_once(':')?;
+                self.idx
+                    .as_ref()?
+                    .nodes
+                    .iter()
+                    .find(|n| n.path == path && n.name == name)
+                    .map(|n| n.body)
+            }
+            "path" => self
+                .flat
+                .as_ref()?
+                .get(r.trim_matches('/'))
+                .and_then(|l| l.r#ref),
+            _ => None,
+        }
+    }
+
+    /// Stale: anchored to content that has changed since, or is gone.
+    fn stale(&mut self, m: &Memory) -> bool {
+        match m.anchor {
+            None => false,
+            Some(a) => self.current(&m.scope.kind, &m.scope.r#ref) != Some(a),
+        }
+    }
+}
+
+/// The content a new memory is about, for its anchor.
+fn memory_anchor(repo: &Repo, actor: &Actor, kind: &str, r: &str) -> Option<ObjectId> {
+    Anchors::new(repo, actor).current(kind, &Cbor::Text(r.to_string()))
+}
+
+/// A memory as a caller sees it, with whether its content has moved on
+/// and which memory it superseded.
+fn memory_json_with(anchors: &mut Anchors<'_>, id: &EntityId, m: &Memory) -> Json {
+    let mut j = memory_json(id, m);
+    j["stale"] = json!(anchors.stale(m));
+    if let Some(a) = m.anchor {
+        j["anchor"] = json!(a.to_hex());
+    }
+    if let Some(links) = &m.links {
+        let superseded: Vec<String> = links
+            .iter()
+            .filter_map(|l| anchors.repo.get_bytes(l).ok().flatten())
+            .filter(|b| cbor::peek_tag(b).ok().as_deref() == Some("memory"))
+            .filter_map(|b| cbor::decode::<Memory>(&b).ok())
+            .map(|old| old.id.to_letters())
+            .collect();
+        if !superseded.is_empty() {
+            j["supersedes"] = json!(superseded);
+        }
+    }
+    j
+}
+
+/// Put stale memories last, keeping the order among the rest.
+fn stale_last(list: &mut [Json]) {
+    list.sort_by_key(|j| j["stale"] == json!(true));
+}
+
+/// A memory by ID prefix: its entity, its current version, and the memory.
+fn find_memory(repo: &Repo, prefix: &str) -> Result<Option<(EntityId, ObjectId, Memory)>> {
+    let view = repo.log.current_view()?;
+    let vs = ViewState::new(repo.store());
+    for (id, ptr) in vs.entities(&view)? {
+        if !id.matches_prefix(prefix) {
+            continue;
+        }
+        let Ok(oid) = ptr.single() else { continue };
+        if let Some(bytes) = repo.get_bytes(&oid)? {
+            if cbor::peek_tag(&bytes).ok().as_deref() == Some("memory") {
+                return Ok(Some((id, oid, cbor::decode::<Memory>(&bytes)?)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// All current memories visible to the actor, most relevant first for a path.
 fn memories(
     repo: &Repo,
@@ -609,7 +734,7 @@ fn memories(
             continue;
         }
         let m: Memory = cbor::decode(&bytes)?;
-        if m.status == "retired" {
+        if m.status == "retired" || m.status == "superseded" {
             continue;
         }
         if m.visibility == "private" && m.author != actor.principal() {
@@ -791,12 +916,14 @@ fn status(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
             .iter()
             .map(|u| json!({ "clause": u.clause, "reason": u.reason }))
             .collect::<Vec<_>>());
-        let open_questions: Vec<Json> =
+        let open_questions: Vec<Json> = {
+            let mut anchors = Anchors::new(repo, actor);
             memories(repo, actor, None, Some(&["question".to_string()]))?
                 .into_iter()
                 .filter(|(_, m)| m.status == "active")
-                .map(|(id, m)| memory_json(&id, &m))
-                .collect();
+                .map(|(id, m)| memory_json_with(&mut anchors, &id, &m))
+                .collect()
+        };
         result["questions"] = json!(open_questions);
         if let Some(agent) = repo.session_agent(&actor.principal()) {
             if let Some(a) = crate::swarm::load_assignment(repo, &agent) {
@@ -1003,15 +1130,19 @@ fn context(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let mut mems = Vec::new();
     let mems_all = memories(repo, actor, path, None)?;
     let mems_total = mems_all.len();
-    for (id, m) in mems_all {
-        let j = memory_json(&id, &m);
-        let cost = json_len(&j) + 1;
-        if cost > chars_left {
-            break;
+    {
+        let mut anchors = Anchors::new(repo, actor);
+        for (id, m) in mems_all {
+            let j = memory_json_with(&mut anchors, &id, &m);
+            let cost = json_len(&j) + 1;
+            if cost > chars_left {
+                break;
+            }
+            chars_left -= cost;
+            mems.push(j);
         }
-        chars_left -= cost;
-        mems.push(j);
     }
+    stale_last(&mut mems);
     let claims_all: Vec<Json> = {
         let view = repo.log.current_view()?;
         let t = tessra_core::trie::Trie::new(repo.store());
@@ -1210,6 +1341,7 @@ fn unit_pack(
         .map(|n| json!({ "path": n.path, "name": n.name, "kind": n.kind }))
         .collect();
     let mut mems = Vec::new();
+    let mut anchors = Anchors::new(repo, actor);
     for (id, m) in memories(repo, actor, Some(&node.path), None)? {
         let on_node = m.scope.kind == "node"
             && matches!(&m.scope.r#ref, Cbor::Text(r) if r == &node.nid.to_letters() || r == &node.name);
@@ -1222,8 +1354,10 @@ fn unit_pack(
             break;
         }
         chars_left -= cost;
-        mems.push(memory_json(&id, &m));
+        mems.push(memory_json_with(&mut anchors, &id, &m));
     }
+    drop(anchors);
+    stale_last(&mut mems);
     let claims: Vec<Json> = crate::swarm::overlapping_claims(
         repo,
         actor.principal(),
@@ -1259,15 +1393,19 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
             let mut chars_left = budget * 4;
             let mut out = Vec::new();
             let mut cursor = None;
+            let mut anchors = Anchors::new(repo, actor);
             for (id, m) in memories(repo, actor, scope_ref, kinds.as_deref())? {
-                let cost = m.body.len() + 80;
+                let j = memory_json_with(&mut anchors, &id, &m);
+                let cost = json_len(&j) + 1;
                 if cost > chars_left {
                     cursor = Some(id.to_letters());
                     break;
                 }
                 chars_left -= cost;
-                out.push(memory_json(&id, &m));
+                out.push(j);
             }
+            drop(anchors);
+            stale_last(&mut out);
             ok(json!({ "memories": out, "cursor": cursor }), &[])
         }
         "revision" => {
@@ -2420,6 +2558,11 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             format!("memory kind {kind}; use one of {}", MEMORY_KINDS.join(", ")),
         ));
     }
+    // `retire` takes a memory back, by its author or the owner; nothing
+    // new is recorded.
+    if let Some(prefix) = arg_str(args, "retire") {
+        return retire_memory(repo, actor, prefix, args);
+    }
     let body = arg_str(args, "body").ok_or_else(|| Error::verb("ARGS", "remember needs body"))?;
     let (scope_kind, scope_ref) = match args.get("scope") {
         Some(s) => (
@@ -2468,6 +2611,25 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         }
     }
     let confidence = args.get("confidence").and_then(Json::as_f64).unwrap_or(0.8);
+    // The content the memory is about, so recall can say when it has
+    // changed since: a unit's body, or a file's blob.
+    let anchor = memory_anchor(repo, actor, &scope_kind, &scope_ref);
+    // A memory that replaces an earlier one retires it in the same op.
+    let superseded =
+        match arg_str(args, "supersedes") {
+            Some(prefix) => Some(find_memory(repo, prefix)?.ok_or_else(|| {
+                Error::verb("NOT_FOUND", format!("no memory {prefix} to supersede"))
+            })?),
+            None => None,
+        };
+    if let Some((_, _, old)) = &superseded {
+        if old.author != actor.principal() && actor.kind != "daemon" {
+            return Err(Error::verb(
+                "SCOPE",
+                "only a memory's author or the owner supersedes it",
+            ));
+        }
+    }
     let m = Memory {
         id: EntityId::random(),
         prev: None,
@@ -2477,31 +2639,44 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             r#ref: Cbor::Text(scope_ref.clone()),
         },
         body: body.into(),
-        anchor: None,
+        anchor,
         confidence: (confidence.clamp(0.0, 1.0) * 1000.0) as u16,
         author: actor.principal(),
         time: now(),
         expires: None,
         proposed: None,
         status: "active".into(),
-        links: None,
+        links: superseded.as_ref().map(|(_, oid, _)| vec![*oid]),
         visibility: arg_str(args, "visibility").unwrap_or("shared").into(),
     };
     let oid = repo.store().put(&m)?;
+    let mut effects = vec![
+        Effect::Put { id: oid },
+        Effect::Point {
+            entity: m.id,
+            to: oid,
+            from: None,
+        },
+    ];
+    if let Some((old_id, old_oid, old)) = &superseded {
+        let mut gone = old.clone();
+        gone.prev = Some(*old_oid);
+        gone.status = "superseded".into();
+        let gone_oid = repo.store().put(&gone)?;
+        effects.push(Effect::Put { id: gone_oid });
+        effects.push(Effect::Point {
+            entity: *old_id,
+            to: gone_oid,
+            from: Some(Pointer::Id(*old_oid).to_value()),
+        });
+    }
     let op = build::build_op(
         &repo.log,
         &actor.signer,
         actor.cap,
         "remember",
         build::args_with_idem(idem_from(args), BTreeMap::new()),
-        vec![
-            Effect::Put { id: oid },
-            Effect::Point {
-                entity: m.id,
-                to: oid,
-                from: None,
-            },
-        ],
+        effects,
         now(),
     )?;
     let op_id = repo.commit_op(&op)?;
@@ -2519,9 +2694,51 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         _ => m.id,
     };
     ok(
-        json!({ "memory": memory_id.to_letters(), "kind": kind, "scope": { "kind": scope_kind, "ref": scope_ref } }),
+        json!({
+            "memory": memory_id.to_letters(), "kind": kind, "scope": { "kind": scope_kind, "ref": scope_ref },
+            "anchor": anchor.map(|a| a.to_hex()),
+            "supersedes": superseded.as_ref().map(|(id, _, _)| id.to_letters()),
+        }),
         &[],
     )
+}
+
+/// Take a memory back: a new version with status `retired`, which recall
+/// leaves out. The author or the owner may.
+fn retire_memory(repo: &mut Repo, actor: &mut Actor, prefix: &str, args: &Json) -> Result<Outcome> {
+    let (id, oid, old) = find_memory(repo, prefix)?
+        .ok_or_else(|| Error::verb("NOT_FOUND", format!("no memory {prefix}")))?;
+    if old.author != actor.principal() && actor.kind != "daemon" {
+        return Err(Error::verb(
+            "SCOPE",
+            "only a memory's author or the owner retires it",
+        ));
+    }
+    if old.status == "retired" {
+        return ok(json!({ "retired": id.to_letters(), "already": true }), &[]);
+    }
+    let mut gone = old;
+    gone.prev = Some(oid);
+    gone.status = "retired".into();
+    let gone_oid = repo.store().put(&gone)?;
+    let op = build::build_op(
+        &repo.log,
+        &actor.signer,
+        actor.cap,
+        "remember",
+        build::args_with_idem(idem_from(args), BTreeMap::new()),
+        vec![
+            Effect::Put { id: gone_oid },
+            Effect::Point {
+                entity: id,
+                to: gone_oid,
+                from: Some(Pointer::Id(oid).to_value()),
+            },
+        ],
+        now(),
+    )?;
+    repo.commit_op(&op)?;
+    ok(json!({ "retired": id.to_letters() }), &[])
 }
 
 /// What a verify is about, decided before its tools run.
@@ -7005,5 +7222,128 @@ mod tests {
         repo.remember_session_workspace(&bot).unwrap();
         let reopened = repo.open_session("bot", None, vec!["**".into()]).unwrap();
         assert_eq!(reopened.workspace, bot.workspace);
+    }
+
+    #[test]
+    fn a_memory_is_flagged_stale_when_what_it_describes_changes() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 { 1 }" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "one must stay pure", "scope": { "kind": "unit", "ref": "src/lib.rs:one" } }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert!(out["result"]["anchor"].is_string(), "anchored: {out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "the file is generated", "scope": { "kind": "path", "ref": "src/lib.rs" } }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
+        let mems = q["result"]["memories"].as_array().unwrap();
+        assert_eq!(mems.len(), 2, "{q}");
+        assert!(mems.iter().all(|m| m["stale"] == json!(false)), "{q}");
+        // The unit's body changes, and so does the file.
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": "pub fn one() -> i32 { 2 }" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "two" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
+        let mems = q["result"]["memories"].as_array().unwrap();
+        assert!(mems.iter().all(|m| m["stale"] == json!(true)), "{q}");
+        // A memory about something else is not.
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "decision", "body": "errors are values", "scope": { "kind": "path", "ref": "src/lib.rs" } }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
+        let mems = q["result"]["memories"].as_array().unwrap();
+        assert_eq!(mems[0]["stale"], json!(false), "fresh first: {q}");
+        assert_eq!(mems[2]["stale"], json!(true), "stale last: {q}");
+        let ctx = call(
+            &mut repo,
+            &mut owner,
+            "context",
+            &json!({ "unit": "src/lib.rs:one", "budget": 3000 }),
+        );
+        assert_eq!(ctx["ok"], json!(true), "{ctx}");
+        assert!(
+            ctx["result"]["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["stale"] == json!(true)),
+            "{ctx}"
+        );
+    }
+
+    #[test]
+    fn a_memory_can_be_superseded_and_retired() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let a = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "the build needs FOO", "scope": { "kind": "path", "ref": "src" } }),
+        );
+        assert_eq!(a["ok"], json!(true), "{a}");
+        let a_id = a["result"]["memory"].as_str().unwrap().to_string();
+        let b = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "the build needs FOO and BAR", "scope": { "kind": "path", "ref": "src" }, "supersedes": a_id }),
+        );
+        assert_eq!(b["ok"], json!(true), "{b}");
+        assert_eq!(b["result"]["supersedes"], json!(a_id), "{b}");
+        let b_id = b["result"]["memory"].as_str().unwrap().to_string();
+        let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
+        let mems = q["result"]["memories"].as_array().unwrap();
+        assert_eq!(mems.len(), 1, "the superseded one is gone: {q}");
+        assert_eq!(mems[0]["id"], json!(b_id), "{q}");
+        assert_eq!(mems[0]["supersedes"], json!([a_id]), "{q}");
+        // Someone else's memory is not theirs to retire.
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        let out = call(&mut repo, &mut bot, "remember", &json!({ "retire": b_id }));
+        assert_eq!(out["code"], json!("SCOPE"), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "retire": b_id }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
+        assert_eq!(q["result"]["memories"].as_array().unwrap().len(), 0, "{q}");
     }
 }

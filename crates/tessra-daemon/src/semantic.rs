@@ -107,7 +107,11 @@ pub fn build_nodes(
         // Top-level units by path, then name.
         let mut by_path: HashMap<&str, HashMap<&str, Vec<EntityId>>> = HashMap::new();
         for n in &out {
-            if n.parent.is_none() && is_ident(&n.name) {
+            if n.parent.is_none()
+                && is_ident(&n.name)
+                && n.kind != "test"
+                && n.kind != "test.skipped"
+            {
                 by_path
                     .entry(n.path.as_str())
                     .or_default()

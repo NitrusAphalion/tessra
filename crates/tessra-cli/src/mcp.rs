@@ -20,7 +20,7 @@ const VERBS: &[(&str, &str)] = &[
     ("edit", "Write a file (path, content), replace text (path, old, new, all?), or rename an identifier everywhere (rename, to, path?) as a recorded semantic operation the merge carries into concurrent changes. Plain file edits through other tools also count."),
     ("snapshot", "Record the workspace's state as a revision. Never blocks; flags tell you what will block promotion. then: verify | promote (proposes) | promote landed (the owner lands). A retry with the same idem reports the revision the first call recorded."),
     ("claim", "action: claim (paths, expires_s?, exclusive?, note?) | release (id?). Advisory; the response lists other claims that overlap yours, which means a merge is coming."),
-    ("remember", "Record a memory. kind: fact|decision|convention|gotcha|preference|task|question|summary|resolution. scope: {kind: path|unit|intent|repo, ref}; a session records path, unit (ref path:name), and intent memories, and repo, the default, is the owner's. body. confidence 0..1."),
+    ("remember", "Record a memory. kind: fact|decision|convention|gotcha|preference|task|question|summary|resolution. scope: {kind: path|unit|intent|repo, ref}; a session records path, unit (ref path:name), and intent memories, and repo, the default, is the owner's. body. confidence 0..1. A unit or path memory is anchored to that content and recalled as stale once it changes. supersedes: an earlier memory this one replaces. retire: take a memory of yours back."),
     ("verify", "Run the verifiers the standard still needs (cached when the snapshot was verified before, selected by covering tests when possible) and report the standard clause by clause with what would satisfy each unmet one. full: run everything."),
     ("try", "Speculate: candidates [{path, content} | {path, old, new}, title?] are each materialized on your revision, verified, scored, and ranked; keep: <candidate> writes the winner into your workspace."),
     ("promote", "to: proposed | landed | <target> (with slice: canary | all). Refused with code STANDARD_UNMET and the unmet clauses, each with a fix, if the standard does not hold."),
@@ -142,9 +142,11 @@ fn tool_schema(verb: &str) -> Value {
                 "scope": { "type": "object", "description": "What it is about: {kind: path|unit|intent|repo, ref}.", "properties": { "kind": { "type": "string", "enum": ["path", "unit", "intent", "repo"] }, "ref": { "type": "string" } } },
                 "confidence": prop("number", "How sure you are, 0 to 1."),
                 "visibility": enumerated(&["shared", "private"], "Who may recall it."),
+                "supersedes": prop("string", "An earlier memory this one replaces, by ID prefix; it is retired in the same op."),
+                "retire": prop("string", "Take a memory back by ID prefix instead of recording one; its author or the owner may."),
                 "idem": idem(),
             }),
-            &["kind", "body"],
+            &["kind"],
         ),
         "verify" => (
             json!({
