@@ -265,6 +265,13 @@ fn root_snapshot(repo: &Repo, rev: &Revision) -> Result<(ObjectId, Snapshot)> {
     Ok((id, repo.store().get(&id)?))
 }
 
+/// The tree of the revision a workspace's change is built on.
+fn base_flat_of(repo: &Repo, ws: &Workspace) -> Result<Flat> {
+    let rev: Revision = repo.store().get(&ws.base)?;
+    let (_, snap) = root_snapshot(repo, &rev)?;
+    tree::flatten(repo.store(), &snap.root)
+}
+
 pub fn trunk_head_of(repo: &Repo) -> Result<(ObjectId, u64)> {
     trunk_head(repo)
 }
@@ -1820,13 +1827,23 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let (cur_snap_id, cur_snap) = root_snapshot(repo, &cur)?;
     let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
     let base_flat: Flat = tree::flatten(repo.store(), &cur_snap.root)?;
-    let out = fs::snapshot_dir(
+    let mut out = fs::snapshot_dir(
         repo.store(),
         &ws_path(&ws),
         &rules,
         actor.write_paths.as_deref(),
         Some(&base_flat),
     )?;
+    // Secrets are the change's flag only on the files it touched: one the
+    // base revision already held is trunk's and must not block other work.
+    let trunk_flat;
+    let trunk_flat: &Flat = if ws.base == cur_id {
+        &base_flat
+    } else {
+        trunk_flat = base_flat_of(repo, &ws)?;
+        &trunk_flat
+    };
+    fs::scope_secrets_to_changes(&mut out.flags, &out.flat, trunk_flat);
     let flags = if out.flags.is_empty() {
         None
     } else {
@@ -3634,6 +3651,11 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     let (cur_snap_id, cur_snap) = root_snapshot(repo, &cur)?;
     let (cur_idx_id, cur_idx) = crate::semantic::index_for_snapshot(repo.store(), &cur_snap_id)?;
     let base_flat = tree::flatten(repo.store(), &cur_snap.root)?;
+    let trunk_flat = if ws.base == cur_id {
+        base_flat.clone()
+    } else {
+        base_flat_of(repo, &ws)?
+    };
     let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
     let mut ranked: Vec<(u64, Json)> = Vec::new();
     let mut edits: Vec<Option<(String, Vec<u8>)>> = Vec::new();
@@ -3689,7 +3711,8 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
             Some(&base_flat),
         );
         repo.store().end_batch()?;
-        let out = out?;
+        let mut out = out?;
+        fs::scope_secrets_to_changes(&mut out.flags, &out.flat, &trunk_flat);
         let _ = std::fs::remove_dir_all(&dir);
         if out.tree == cur_snap.root {
             ranked.push((
@@ -5353,6 +5376,80 @@ mod tests {
             out["message"].as_str().unwrap_or("").contains("flags.none"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_secret_trunk_already_holds_does_not_flag_unrelated_work() {
+        let (_dir, mut repo, mut actor) = scratch();
+        // A key-shaped file reaches trunk with the flags clause lifted, as a
+        // git import would put one there.
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "standard",
+            &json!({ "remove": ["structural(flags.none)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "key.txt", "content": format!("token {key}\n") }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "key" }),
+        );
+        assert!(out["result"]["flags"]["secrets"].is_array(), "{out}");
+        let out = call(&mut repo, &mut actor, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "standard",
+            &json!({ "require": ["structural(flags.none)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // A change that touches another file is not flagged for trunk's key.
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "notes.txt", "content": "hello\n" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "notes" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert!(out["result"]["flags"]["secrets"].is_null(), "{out}");
+        let out = call(&mut repo, &mut actor, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // A change that edits the key file carries the flag and is refused.
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "edit",
+            &json!({ "path": "key.txt", "content": format!("token {key} again\n") }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut actor,
+            "snapshot",
+            &json!({ "title": "touch the key" }),
+        );
+        assert!(out["result"]["flags"]["secrets"].is_array(), "{out}");
+        let out = call(&mut repo, &mut actor, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert_eq!(out["code"], json!("STANDARD_UNMET"), "{out}");
     }
 
     #[test]

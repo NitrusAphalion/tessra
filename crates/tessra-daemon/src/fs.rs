@@ -82,10 +82,8 @@ fn unportable(name: &str) -> bool {
 /// contains them verbatim: the repository is developed under Tessra, and the
 /// scanner must not flag its own source. What it detects is unchanged.
 fn scan_secrets(text: &str) -> Vec<String> {
-    const PEM_HEAD: &str = concat!("-----BEG", "IN");
-    const PEM_TAIL: &str = concat!("PRIVATE K", "EY-----");
     let mut hits = Vec::new();
-    if text.contains(PEM_HEAD) && text.contains(PEM_TAIL) {
+    if has_private_key_block(text) {
         hits.push("private-key-block".into());
     }
     let alnum = |c: char| c.is_ascii_alphanumeric();
@@ -109,6 +107,62 @@ fn scan_secrets(text: &str) -> Vec<String> {
     check("xoxb-", 20, "slack-token", &mut hits);
     check("sk-", 32, "api-key", &mut hits);
     hits
+}
+
+/// A PEM private key: a `BEGIN … PRIVATE KEY` armour line, then at least 64
+/// characters of base64 body, then the matching `END` line. Lines are split
+/// on newlines and on the two-character `\n` escape, so a key pasted into a
+/// JSON string is one too. A file that only mentions the armour, such as a
+/// page telling users what their key file starts with, a parser's regular
+/// expression, or a test's empty fixture, holds no key. The needles are
+/// assembled at compile time, as above, so this source is never flagged.
+fn has_private_key_block(text: &str) -> bool {
+    const HEAD: &str = concat!("-----BEG", "IN ");
+    const END: &str = concat!("-----E", "ND ");
+    const TAIL: &str = concat!("PRIVATE K", "EY-----");
+    let is_base64 = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+    };
+    let mut in_block = false;
+    let mut body = 0usize;
+    for line in text.split('\n').flat_map(|l| l.split("\\n")) {
+        let t = line.trim();
+        if !in_block {
+            if let Some(after) = t.find(HEAD).map(|i| &t[i + HEAD.len()..]) {
+                if after.contains(TAIL) {
+                    in_block = true;
+                    body = 0;
+                }
+            }
+            continue;
+        }
+        if t.contains(END) && t.contains(TAIL) {
+            if body >= 64 {
+                return true;
+            }
+            in_block = false;
+        } else if t.is_empty() || (body == 0 && t.contains(": ")) {
+            // Blank lines and the headers of an encrypted key, before the body.
+        } else if is_base64(t) {
+            body += t.len();
+        } else {
+            in_block = false;
+        }
+    }
+    false
+}
+
+/// Keep only the secret matches on files the tree changed against `base`.
+/// A match on a file the change did not touch was there before the change:
+/// it is the base revision's, and must not block unrelated work.
+pub fn scope_secrets_to_changes(flags: &mut Flags, flat: &Flat, base: &Flat) {
+    if let Some(secrets) = flags.secrets.as_mut() {
+        secrets.retain(|s| base.get(&s.path) != flat.get(&s.path));
+        if secrets.is_empty() {
+            flags.secrets = None;
+        }
+    }
 }
 
 /// Snapshot `dir` into a tree. `write_scope` flags paths outside it rather
@@ -682,6 +736,102 @@ mod tests {
         );
         let again = snapshot_dir(&s, dst.path(), &rules, None, None).unwrap();
         assert_eq!(again.tree, out.tree);
+    }
+
+    /// PEM armour built at run time, so this source never holds it.
+    fn armour(which: &str, label: &str) -> String {
+        format!("-----{which} {label} PRIVATE {}-----", "KEY")
+    }
+
+    #[test]
+    fn a_private_key_block_needs_a_base64_body_between_its_armour_lines() {
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7".repeat(3);
+        let key = format!(
+            "{}\n{body}\n{}\n",
+            armour("BEGIN", "RSA"),
+            armour("END", "RSA")
+        );
+        assert_eq!(scan_secrets(&key), vec!["private-key-block".to_string()]);
+        // An encrypted key carries headers before its body.
+        let encrypted = format!(
+            "{}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123\n\n{body}\n{}\n",
+            armour("BEGIN", "RSA"),
+            armour("END", "RSA")
+        );
+        assert_eq!(scan_secrets(&encrypted).len(), 1);
+        // A key pasted into a JSON string keeps its newlines as escapes.
+        let json = format!(
+            "{{\"private_key\": \"{}\\n{body}\\n{}\\n\"}}",
+            armour("BEGIN", ""),
+            armour("END", "")
+        );
+        assert_eq!(scan_secrets(&json).len(), 1, "{json}");
+        // Documentation that says what a key file starts with.
+        let docs = format!(
+            "Your downloaded key file begins with `{}`.\n\nKeep it out of the repository.\n",
+            armour("BEGIN", "RSA")
+        );
+        assert!(scan_secrets(&docs).is_empty(), "{docs}");
+        // A parser that strips the armour, and a test fixture with no body.
+        let parser = format!(
+            "const head = /-----BEGIN [A-Z0-9 ]*-----/;\nconst rsa = /BEGIN RSA PRIVATE {}/;\n",
+            "KEY"
+        );
+        assert!(scan_secrets(&parser).is_empty(), "{parser}");
+        let fixture = format!(
+            "const bad = '{}\\nZm9v\\n{}';\n",
+            armour("BEGIN", ""),
+            armour("END", "")
+        );
+        assert!(scan_secrets(&fixture).is_empty(), "{fixture}");
+        // Both armour lines with prose between them are not a key either.
+        let prose = format!(
+            "{}\nthe key goes here, one line per 64 characters\n{}\n",
+            armour("BEGIN", ""),
+            armour("END", "")
+        );
+        assert!(scan_secrets(&prose).is_empty(), "{prose}");
+    }
+
+    #[test]
+    fn secrets_are_scoped_to_the_files_a_change_touched() {
+        let s = MemoryStore::new();
+        let leaf = |text: &str| Leaf::file(s.put_blob(text.as_bytes()).unwrap(), false);
+        let mut base = Flat::new();
+        base.insert("signing.ts".into(), leaf("old"));
+        base.insert("notes.md".into(), leaf("notes"));
+        let mut flat = base.clone();
+        flat.insert("signing.ts".into(), leaf("new"));
+        let mut flags = Flags {
+            secrets: Some(vec![
+                SecretMatch {
+                    path: "signing.ts".into(),
+                    pattern: "api-key".into(),
+                },
+                SecretMatch {
+                    path: "notes.md".into(),
+                    pattern: "api-key".into(),
+                },
+            ]),
+            ..Flags::default()
+        };
+        scope_secrets_to_changes(&mut flags, &flat, &base);
+        let kept: Vec<&str> = flags
+            .secrets
+            .iter()
+            .flatten()
+            .map(|m| m.path.as_str())
+            .collect();
+        assert_eq!(kept, vec!["signing.ts"], "the untouched file's match goes");
+        let mut flags = Flags {
+            secrets: Some(vec![SecretMatch {
+                path: "notes.md".into(),
+                pattern: "api-key".into(),
+            }]),
+            ..Flags::default()
+        };
+        scope_secrets_to_changes(&mut flags, &flat, &base);
+        assert!(flags.secrets.is_none(), "no match left means no flag");
     }
 
     #[test]
