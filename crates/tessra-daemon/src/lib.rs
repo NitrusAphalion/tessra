@@ -115,9 +115,19 @@ pub struct Repo {
     pub daemon: EntityId,
     daemon_key: SecretKey,
     pub workspaces: Vec<Workspace>,
-    /// Set while one of this repository's verifiers runs; the daemon
-    /// answers BUSY for this repository meanwhile.
+    /// Set while one of this repository's verifiers runs.
     pub verifying: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The standard's status per revision, good until the next op: the
+    /// state echo on every response asks for it, and between ops the
+    /// answer cannot change.
+    pub standard_memo: std::cell::RefCell<StandardMemo>,
+}
+
+/// What `standard_status` answered for each revision at a set of op heads.
+#[derive(Default)]
+pub struct StandardMemo {
+    pub heads: Vec<ObjectId>,
+    pub by_rev: BTreeMap<ObjectId, (usize, Vec<tessra_oplog::standard::Unmet>, Vec<ObjectId>)>,
 }
 
 pub struct InitOptions {
@@ -210,6 +220,7 @@ impl Repo {
             daemon_key,
             workspaces: Vec::new(),
             verifying: Default::default(),
+            standard_memo: Default::default(),
         };
         // The colocated checkout is a workspace owned by the daemon's principal.
         let ws = Workspace {
@@ -278,6 +289,7 @@ impl Repo {
             daemon_key,
             workspaces: Vec::new(),
             verifying: Default::default(),
+            standard_memo: Default::default(),
         };
         repo.workspaces = repo.load_workspaces()?;
         verifiers::ensure_index(repo.store())?;

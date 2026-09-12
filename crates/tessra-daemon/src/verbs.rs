@@ -408,6 +408,18 @@ fn standard_status(
     rev_id: &ObjectId,
     rev: &Revision,
 ) -> Result<(usize, Vec<standard::Unmet>, Vec<ObjectId>)> {
+    // Between ops the answer cannot change: the standard, the attestations,
+    // and the revision are all reached through the op log.
+    let mut heads: Vec<ObjectId> = repo.log.heads().into_iter().collect();
+    heads.sort();
+    {
+        let memo = repo.standard_memo.borrow();
+        if memo.heads == heads {
+            if let Some(v) = memo.by_rev.get(rev_id) {
+                return Ok(v.clone());
+            }
+        }
+    }
     let view = repo.log.current_view()?;
     let vs = ViewState::new(repo.store());
     let std_id = trunk_standard(repo)?;
@@ -421,7 +433,16 @@ fn standard_status(
         .iter()
         .map(|s| s.clauses.len())
         .sum::<usize>();
-    Ok((total.saturating_sub(unmet.len()), unmet, attests))
+    let answer = (total.saturating_sub(unmet.len()), unmet, attests);
+    {
+        let mut memo = repo.standard_memo.borrow_mut();
+        if memo.heads != heads {
+            memo.heads = heads;
+            memo.by_rev.clear();
+        }
+        memo.by_rev.insert(*rev_id, answer.clone());
+    }
+    Ok(answer)
 }
 
 fn actor_claims(repo: &Repo, actor: &Actor) -> Result<Vec<(EntityId, Claim)>> {

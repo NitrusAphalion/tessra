@@ -22,6 +22,11 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- The node merge keys units by node ID, resolved through the aliases of the base and both sides, instead of recomputing `(kind, name, ordinal)` per side, so the history-aware identity the index keeps now decides what lines up with what. Same-named siblings such as overloads match by body first, so one inserted above another no longer drifts into a spurious conflict.
+- Rust attributes and doc comments, and Python block structure, are part of a unit's body hash, so two sides that add different derives, or a statement moved out of an `if`, merge as the edits they are instead of one side silently winning. A lone trailing comma in a tuple stays semantic, so `(1,)` and `(1)` differ.
+- A rename is applied to identifier tokens of the parse and nowhere else: not inside strings or comments, not to a field or property access, a struct key, or a keyword argument, and not to a local or parameter that shadows the name. A rename onto a name the base already gives a unit of the same kind, or that the other side renamed something else to, is a conflict rather than two definitions; `edit --rename` refuses up front when the target name is taken.
+- A unit renamed and edited in one change without a recorded rename keeps its identity when its body overlaps the vanished unit's closely enough, so a concurrent call to the old name is carried to the new one instead of landing broken.
+- A member inserted above the first member of a container keeps the separator that lives outside the unit's span.
 - `context --path` no longer needs a workspace: without one it describes trunk, as `--unit` already did, reading the file or directory from the revision's tree.
 - A refused promotion carries `unmet` as a list of clauses, each with its reason and a `fix`, the `stage` refused, and `fix: "verify"`, as VERBS.md describes; the clause list is no longer text inside `message` alone.
 - A `snapshot` or `remember` retried with the same idempotency key reports the revision or memory the first call recorded (`retried: true` on a snapshot) and points the workspace at it, instead of naming a revision that was never recorded.

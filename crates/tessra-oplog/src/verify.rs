@@ -907,14 +907,29 @@ fn check_legality<S: ObjectStore>(
 }
 
 /// Every revision reachable from a line head through `parents`.
+/// The landed sets last computed, by the line heads they were computed
+/// from. The set depends on nothing else in a view, so a status, a
+/// legality check, or a frontier pass after the first for the same heads
+/// is a lookup instead of a walk over every landed revision.
+type LandedEntry = (Vec<ObjectId>, std::sync::Arc<HashSet<ObjectId>>);
+static LANDED: std::sync::Mutex<Vec<LandedEntry>> = std::sync::Mutex::new(Vec::new());
+const LANDED_KEPT: usize = 16;
+
 pub fn landed_revisions<S: ObjectStore>(store: &S, view: &View) -> Result<HashSet<ObjectId>> {
-    let mut seen = HashSet::new();
-    let mut queue: VecDeque<ObjectId> = VecDeque::new();
+    let mut key: Vec<ObjectId> = Vec::new();
     for ls in view.lines.values() {
         if let Some(p) = line_head(ls) {
-            queue.extend(p.ids());
+            key.extend(p.ids());
         }
     }
+    key.sort();
+    if let Ok(cache) = LANDED.lock() {
+        if let Some((_, set)) = cache.iter().find(|(k, _)| *k == key) {
+            return Ok((**set).clone());
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut queue: VecDeque<ObjectId> = key.iter().copied().collect();
     while let Some(id) = queue.pop_front() {
         if !seen.insert(id) {
             continue;
@@ -924,6 +939,12 @@ pub fn landed_revisions<S: ObjectStore>(store: &S, view: &View) -> Result<HashSe
                 queue.extend(r.parents.iter().copied());
             }
         }
+    }
+    if let Ok(mut cache) = LANDED.lock() {
+        if cache.len() >= LANDED_KEPT {
+            cache.remove(0);
+        }
+        cache.push((key, std::sync::Arc::new(seen.clone())));
     }
     Ok(seen)
 }
