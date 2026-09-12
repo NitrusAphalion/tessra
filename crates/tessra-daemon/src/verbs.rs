@@ -196,6 +196,53 @@ fn actor_workspace(repo: &Repo, actor: &Actor) -> Option<Workspace> {
     }
 }
 
+/// A workspace is materialized into a directory of its own: what the tree
+/// does not hold is removed from it. An existing directory with contents is
+/// refused, since a checkout's ignored files (dependencies, build output,
+/// local environment) would be the first to go, and so is any path inside
+/// the repository, which is the owner's checkout.
+fn refuse_unless_fresh(repo: &Repo, path: &std::path::Path) -> Result<()> {
+    let shown = path.display();
+    let inside = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .map(|c| c.starts_with(&repo.root))
+            .unwrap_or(false)
+    };
+    // The path itself, or the nearest ancestor that exists, decides whether
+    // the workspace would land inside the checkout.
+    let mut probe = Some(path);
+    while let Some(p) = probe {
+        if p.exists() {
+            if inside(p) {
+                return Err(Error::verb(
+                    "ARGS",
+                    format!(
+                        "workspace path {shown} is inside the repository at {}; a workspace is a directory of its own outside the checkout, or omit --path for one under the local data directory",
+                        repo.root.display()
+                    ),
+                ));
+            }
+            break;
+        }
+        probe = p.parent();
+    }
+    if path.is_file() {
+        return Err(Error::verb(
+            "ARGS",
+            format!("workspace path {shown} is a file"),
+        ));
+    }
+    if path.is_dir() && std::fs::read_dir(path)?.next().is_some() {
+        return Err(Error::verb(
+            "ARGS",
+            format!(
+                "workspace path {shown} exists and is not empty; a workspace is materialized into a new or empty directory, since files the revision does not hold are removed from it"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn require_workspace(repo: &Repo, actor: &Actor) -> Result<Workspace> {
     actor_workspace(repo, actor)
         .ok_or_else(|| Error::verb("NO_WORKSPACE", "you have no workspace yet"))
@@ -1487,7 +1534,11 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             };
             let id = EntityId::random();
             let path = match arg_str(args, "path") {
-                Some(p) => PathBuf::from(p),
+                Some(p) => {
+                    let path = PathBuf::from(p);
+                    refuse_unless_fresh(repo, &path)?;
+                    path
+                }
                 None => paths::workspaces_dir_for(&repo.repo_id).join(id.to_letters()),
             };
             let rev: Revision = repo.store().get(&base)?;
@@ -1548,7 +1599,11 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             let rev: Revision = repo.store().get(&target)?;
             let (_, snap) = root_snapshot(repo, &rev)?;
             let dir = ws_path(&ws);
-            let n = fs::materialize(repo.store(), &snap.root, &dir, false)?;
+            // Only what the tracking rules would snapshot is put back or
+            // removed: a checkout's dependencies, build output, and local
+            // environment files were never in the tree and stay.
+            let rules: TrackingRules = repo.store().get(&snap.rules)?;
+            let n = fs::materialize_tracked(repo.store(), &snap.root, &dir, &rules)?;
             let state = restore_state(repo, &snap, &dir)?;
             if let Some(w) = repo.workspace_mut(&ws.id) {
                 w.current = Some(target);
@@ -5183,6 +5238,54 @@ mod tests {
         .unwrap();
         let actor = repo.daemon_actor();
         (dir, repo, actor)
+    }
+
+    #[test]
+    fn a_workspace_is_created_only_in_a_fresh_directory_outside_the_checkout() {
+        let (dir, mut repo, mut actor) = scratch();
+        // The checkout holds a file no tree has, as a checkout does.
+        std::fs::write(dir.path().join("local.env"), "SECRET=1\n").unwrap();
+        let create = |repo: &mut Repo, actor: &mut Actor, path: &std::path::Path| {
+            call(
+                repo,
+                actor,
+                "workspace",
+                &json!({ "action": "create", "path": path.display().to_string() }),
+            )
+        };
+        // The checkout itself, and a new directory inside it.
+        for path in [dir.path().to_path_buf(), dir.path().join("ws")] {
+            let out = create(&mut repo, &mut actor, &path);
+            assert_eq!(out["ok"], json!(false), "{out}");
+            assert_eq!(out["code"], json!("ARGS"), "{out}");
+            assert!(
+                out["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("inside the repository"),
+                "{out}"
+            );
+        }
+        assert!(dir.path().join("local.env").exists(), "nothing was removed");
+        // A directory elsewhere that already has contents.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("keep.txt"), "keep\n").unwrap();
+        let out = create(&mut repo, &mut actor, other.path());
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert!(
+            out["message"].as_str().unwrap_or("").contains("not empty"),
+            "{out}"
+        );
+        assert!(
+            other.path().join("keep.txt").exists(),
+            "nothing was removed"
+        );
+        // An empty directory, and one that does not exist yet, are fine.
+        let empty = tempfile::tempdir().unwrap();
+        let out = create(&mut repo, &mut actor, empty.path());
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = create(&mut repo, &mut actor, &other.path().join("fresh"));
+        assert_eq!(out["ok"], json!(true), "{out}");
     }
 
     #[test]

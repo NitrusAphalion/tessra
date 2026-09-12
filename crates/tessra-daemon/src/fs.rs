@@ -432,6 +432,37 @@ pub fn materialize<S: ObjectStore>(
             }
         }
     }
+    write_flat(store, &flat, dir)
+}
+
+/// Write a tree into `dir` as `materialize` does, removing only the existing
+/// files the tracking rules would snapshot. What the rules ignore, such as
+/// dependencies, build output, and local environment files, was never part
+/// of a tree and stays; a checkout put back at a revision keeps its
+/// toolchain. Conflict sidecars go, since the tree says what is conflicted.
+pub fn materialize_tracked<S: ObjectStore>(
+    store: &S,
+    tree_id: &ObjectId,
+    dir: &Path,
+    rules: &TrackingRules,
+) -> Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let flat = tree::flatten(store, tree_id)?;
+    for (rel, full) in tracked_files(dir, rules)? {
+        if !flat.contains_key(&rel) {
+            let _ = std::fs::remove_file(full);
+        }
+    }
+    for rel in list_files(dir, dir)? {
+        if rel.ends_with(".tessra-conflict") {
+            let _ = std::fs::remove_file(dir.join(&rel));
+        }
+    }
+    write_flat(store, &flat, dir)
+}
+
+/// Write every entry of `flat` under `dir`. Returns the number written.
+fn write_flat<S: ObjectStore>(store: &S, flat: &Flat, dir: &Path) -> Result<usize> {
     // Plain files are written by a few threads at once; everything else in order.
     let files: Vec<(PathBuf, ObjectId, bool)> = flat
         .iter()
@@ -477,7 +508,7 @@ pub fn materialize<S: ObjectStore>(
         }
         Ok(total)
     })?;
-    for (path, leaf) in &flat {
+    for (path, leaf) in flat {
         let full = dir.join(path);
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
@@ -651,5 +682,59 @@ mod tests {
         );
         let again = snapshot_dir(&s, dst.path(), &rules, None, None).unwrap();
         assert_eq!(again.tree, out.tree);
+    }
+
+    #[test]
+    fn materialize_tracked_keeps_what_the_rules_ignore_and_drops_tracked_extras() {
+        let s = MemoryStore::new();
+        let mut rules = TrackingRules::default();
+        for pattern in ["*.log", "build/", ".env"] {
+            rules.rules.push(tessra_core::object::Rule {
+                pattern: pattern.into(),
+                class: 1,
+                generator: None,
+                media: None,
+            });
+        }
+        // The tree: one source file.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("src")).unwrap();
+        std::fs::write(src.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+        let out = snapshot_dir(&s, src.path(), &rules, None, None).unwrap();
+        // A checkout with an older a.rs, a tracked file the tree lacks, a
+        // stale conflict sidecar, and files the rules ignore.
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() { 0 }\n").unwrap();
+        std::fs::write(root.join("src/stale.rs"), "fn stale() {}\n").unwrap();
+        std::fs::write(root.join("src/x.rs.tessra-conflict"), "terms").unwrap();
+        std::fs::write(root.join("build/out.o"), "object").unwrap();
+        std::fs::write(root.join("notes.log"), "kept").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+        let n = materialize_tracked(&s, &out.tree, root, &rules).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            std::fs::read(root.join("src/a.rs")).unwrap(),
+            b"fn a() {}\n",
+            "a tracked file takes the tree's content"
+        );
+        assert!(!root.join("src/stale.rs").exists(), "a tracked extra goes");
+        assert!(
+            !root.join("src/x.rs.tessra-conflict").exists(),
+            "a stale sidecar goes"
+        );
+        assert!(
+            root.join("build/out.o").exists(),
+            "an ignored directory stays"
+        );
+        assert!(root.join("notes.log").exists(), "an ignored file stays");
+        assert!(root.join(".env").exists(), "an ignored dotfile stays");
+        // Plain materialize would have removed all three.
+        let n = materialize(&s, &out.tree, root, false).unwrap();
+        assert_eq!(n, 1);
+        assert!(!root.join("build/out.o").exists());
+        assert!(!root.join("notes.log").exists());
     }
 }
