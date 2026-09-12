@@ -13,7 +13,7 @@ use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
 use tessra_semantic::matching::{assign_ids_with_refs, inferred_renames};
 use tessra_semantic::merge::{merge_file, FileNodes};
-use tessra_semantic::rename::{contains_ident, is_ident, replace_ident, Rename};
+use tessra_semantic::rename::{contains_ident, is_ident, rename_source, Rename};
 use tessra_semantic::{extract, Language, GRAMMARS};
 use tessra_store::RedbStore;
 
@@ -572,9 +572,12 @@ pub fn merge_trees(
     // Files only one side changed: carry the other side's renames into them.
     let mut carried: Vec<(String, ObjectId, Vec<u8>)> = Vec::new();
     for (path, leaf) in &merged {
-        if leaf.kind != EntryKind::File || Language::from_path(path).is_none() {
+        if leaf.kind != EntryKind::File {
             continue;
         }
+        let Some(lang) = Language::from_path(path) else {
+            continue;
+        };
         let Some(blob) = leaf.r#ref else { continue };
         let base_ref = base.get(path).and_then(|l| l.r#ref);
         let a_ref = a.get(path).and_then(|l| l.r#ref);
@@ -598,12 +601,13 @@ pub fn merge_trees(
         if !applicable.iter().any(|r| contains_ident(&text, &r.from)) {
             continue;
         }
-        let mut cur = text;
-        for r in applicable {
-            if let Some(next) = replace_ident(&cur, &r.from, &r.to) {
-                cur = next;
-                resolved.push(format!("{path}: {} renamed to {}", r.from, r.to));
-            }
+        let applicable: Vec<Rename> = applicable.into_iter().cloned().collect();
+        let (cur, applied) = rename_source(lang, &text, &applicable);
+        if applied.is_empty() {
+            continue;
+        }
+        for r in applied {
+            resolved.push(format!("{path}: {} renamed to {}", r.from, r.to));
         }
         carried.push((path.clone(), blob, cur));
     }
@@ -651,6 +655,7 @@ pub fn merge_trees(
                 .collect()
         };
         let m = merge_file(
+            Language::from_path(&path),
             base_fn,
             FileNodes {
                 text: &ta,

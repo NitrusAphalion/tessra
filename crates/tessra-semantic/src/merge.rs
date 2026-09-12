@@ -29,7 +29,8 @@ use tessra_core::object::Node;
 use tessra_core::{EntityId, ObjectId};
 
 use crate::matching::inferred_renames;
-use crate::rename::{apply_all, is_ident, Rename};
+use crate::rename::{apply_edits, is_ident, rename_edits, Edit, Rename};
+use crate::Language;
 
 /// One version of a file with its nodes, which must be in document order
 /// with parents before children.
@@ -199,10 +200,13 @@ fn keys(base: Option<&[Unit]>, side: &[Unit], recorded: &[Rename]) -> Vec<Key> {
     out.into_iter().map(Option::unwrap).collect()
 }
 
-/// Merge one file. `base` is None when both sides added the file. `ops_a`
-/// and `ops_b` are the renames each side recorded; renames inferred from
-/// unit identity are added to them.
+/// Merge one file. `lang` is the file's grammar; without one, renames are
+/// not applied, since only identifier tokens of a parse are renamed.
+/// `base` is None when both sides added the file. `ops_a` and `ops_b` are
+/// the renames each side recorded; renames inferred from unit identity are
+/// added to them.
 pub fn merge_file(
+    lang: Option<Language>,
     base: Option<FileNodes<'_>>,
     a: FileNodes<'_>,
     b: FileNodes<'_>,
@@ -221,6 +225,8 @@ pub fn merge_file(
         }
         out
     };
+    let ren_a = renames(inferred_a, ops_a);
+    let ren_b = renames(inferred_b, ops_b);
     let bu = base.map(|f| build_units(f.nodes));
     let au = build_units(a.nodes);
     let bbu = build_units(b.nodes);
@@ -228,10 +234,14 @@ pub fn merge_file(
         base: base.map(|f| f.text),
         a: a.text,
         b: b.text,
-        ren_a: renames(inferred_a, ops_a),
-        ren_b: renames(inferred_b, ops_b),
-        ops_a: ops_a.to_vec(),
-        ops_b: ops_b.to_vec(),
+        ren_a: &ren_a,
+        ren_b: &ren_b,
+        ops_a,
+        ops_b,
+        edits_a: edits_in(lang, Some(a.text), &ren_b),
+        edits_b: edits_in(lang, Some(b.text), &ren_a),
+        base_edits_a: edits_in(lang, base.map(|f| f.text), &ren_a),
+        base_edits_b: edits_in(lang, base.map(|f| f.text), &ren_b),
     };
     let mut m = Merged::default();
     let mut out = Vec::new();
@@ -253,39 +263,74 @@ pub fn merge_file(
     m
 }
 
+/// Where `renames` land in `text`, when there is a grammar to find
+/// identifier tokens with.
+fn edits_in<'r>(
+    lang: Option<Language>,
+    text: Option<&[u8]>,
+    renames: &'r [Rename],
+) -> Vec<Edit<'r>> {
+    match (lang, text) {
+        (Some(l), Some(t)) => rename_edits(l, t, renames),
+        _ => Vec::new(),
+    }
+}
+
 struct Ctx<'a> {
     base: Option<&'a [u8]>,
     a: &'a [u8],
     b: &'a [u8],
     /// Every rename a side made, recorded or inferred: what is applied to
     /// the other side's text.
-    ren_a: Vec<Rename>,
-    ren_b: Vec<Rename>,
+    ren_a: &'a [Rename],
+    ren_b: &'a [Rename],
     /// The renames a side recorded: what lines a unit up with the base
     /// when identity could not.
-    ops_a: Vec<Rename>,
-    ops_b: Vec<Rename>,
+    ops_a: &'a [Rename],
+    ops_b: &'a [Rename],
+    /// Where the other side's renames land in a side's text, and where a
+    /// side's own renames land in the base text.
+    edits_a: Vec<Edit<'a>>,
+    edits_b: Vec<Edit<'a>>,
+    base_edits_a: Vec<Edit<'a>>,
+    base_edits_b: Vec<Edit<'a>>,
 }
 
-impl Ctx<'_> {
-    fn text(&self, side: Side) -> &[u8] {
+impl<'a> Ctx<'a> {
+    fn text(&self, side: Side) -> &'a [u8] {
         match side {
             Side::A => self.a,
             Side::B => self.b,
         }
     }
 
-    fn renames(&self, side: Side) -> &[Rename] {
+    fn renames(&self, side: Side) -> &'a [Rename] {
         match side {
-            Side::A => &self.ren_a,
-            Side::B => &self.ren_b,
+            Side::A => self.ren_a,
+            Side::B => self.ren_b,
         }
     }
 
-    fn recorded(&self, side: Side) -> &[Rename] {
+    fn recorded(&self, side: Side) -> &'a [Rename] {
         match side {
-            Side::A => &self.ops_a,
-            Side::B => &self.ops_b,
+            Side::A => self.ops_a,
+            Side::B => self.ops_b,
+        }
+    }
+
+    /// The other side's renames, located in this side's text.
+    fn edits(&self, side: Side) -> &[Edit<'a>] {
+        match side {
+            Side::A => &self.edits_a,
+            Side::B => &self.edits_b,
+        }
+    }
+
+    /// This side's renames, located in the base text.
+    fn base_edits(&self, side: Side) -> &[Edit<'a>] {
+        match side {
+            Side::A => &self.base_edits_a,
+            Side::B => &self.base_edits_b,
         }
     }
 }
@@ -402,10 +447,8 @@ fn gap_before<'c>(
 /// Emit a unit's gap and text from one side, with the other side's renames
 /// applied to it. Every rename that changed something is reported.
 fn emit_leaf(ctx: &Ctx<'_>, side: Side, u: &Unit, gap: &[u8], out: &mut Vec<u8>, m: &mut Merged) {
-    let text = ctx.text(side);
     push_gap(out, gap);
-    let body = slice(text, u.span.0, u.span.1);
-    let (fixed, applied) = apply_all(body, ctx.renames(side.other()));
+    let (fixed, applied) = apply_edits(ctx.text(side), u.span.0, u.span.1, ctx.edits(side));
     for r in applied {
         m.resolved.push(format!(
             "{} {}: {} renamed to {}",
@@ -449,12 +492,12 @@ fn change_is_renames(ctx: &Ctx<'_>, side: Side, base_unit: &Unit, side_unit: &Un
     let Some(base_text) = ctx.base else {
         return false;
     };
-    let renames = ctx.renames(side);
-    if renames.is_empty() {
-        return false;
-    }
-    let base_slice = slice(base_text, base_unit.span.0, base_unit.span.1);
-    let (renamed, applied) = apply_all(base_slice, renames);
+    let (renamed, applied) = apply_edits(
+        base_text,
+        base_unit.span.0,
+        base_unit.span.1,
+        ctx.base_edits(side),
+    );
     !applied.is_empty() && renamed == slice(ctx.text(side), side_unit.span.0, side_unit.span.1)
 }
 
@@ -659,14 +702,22 @@ fn merge_container(
     m: &mut Merged,
 ) {
     let base_header = base.and_then(|b| ctx.base.map(|t| header(t, b)));
-    let a_header = header(ctx.a, x);
-    let b_header = header(ctx.b, y);
-    let (gap_side, head, gap_text) = match base_header {
-        Some(bh) if a_header == bh => (Side::B, b_header, gap_b),
-        _ => (Side::A, a_header, gap_a),
+    let (gap_side, head_unit, gap_text) = match base_header {
+        Some(bh) if header(ctx.a, x) == bh => (Side::B, y, gap_b),
+        _ => (Side::A, x, gap_a),
     };
     push_gap(out, gap_text);
-    let (head, applied) = apply_all(head, ctx.renames(gap_side.other()));
+    let head_end = head_unit
+        .children
+        .first()
+        .map(|c| c.span.0)
+        .unwrap_or(head_unit.span.1);
+    let (head, applied) = apply_edits(
+        ctx.text(gap_side),
+        head_unit.span.0,
+        head_end,
+        ctx.edits(gap_side),
+    );
     for r in applied {
         m.resolved.push(format!(
             "{} {}: {} renamed to {}",
@@ -716,6 +767,7 @@ mod tests {
     }
 
     fn merge_nodes(
+        lang: Language,
         base: Option<(&str, &[Node])>,
         a: (&str, &[Node]),
         b: (&str, &[Node]),
@@ -723,6 +775,7 @@ mod tests {
         ops_b: &[Rename],
     ) -> Merged {
         merge_file(
+            Some(lang),
             base.map(|(text, nodes)| FileNodes {
                 text: text.as_bytes(),
                 nodes,
@@ -751,7 +804,7 @@ mod tests {
         let bn = nodes_in(lang, base, &[], None);
         let an = nodes_in(lang, a, &bn, Some(base));
         let bbn = nodes_in(lang, b, &bn, Some(base));
-        merge_nodes(Some((base, &bn)), (a, &an), (b, &bbn), ops_a, ops_b)
+        merge_nodes(lang, Some((base, &bn)), (a, &an), (b, &bbn), ops_a, ops_b)
     }
 
     fn merge_ops(base: &str, a: &str, b: &str, ops_a: &[Rename], ops_b: &[Rename]) -> Merged {
@@ -815,14 +868,28 @@ mod tests {
         let an = nodes(a, &bn);
         let bbn = nodes(&b, &[]);
         assert!(bbn.iter().all(|n| bn.iter().all(|p| p.nid != n.nid)));
-        let m2 = merge_nodes(Some((BASE, &bn)), (a, &an), (&b, &bbn), &[], &[]);
+        let m2 = merge_nodes(
+            Language::Rust,
+            Some((BASE, &bn)),
+            (a, &an),
+            (&b, &bbn),
+            &[],
+            &[],
+        );
         assert!(m2.conflicts.is_empty(), "{:?}", m2.conflicts);
         assert_eq!(String::from_utf8(m2.text).unwrap(), t);
         // And on that side a changed unit is still a change, not a
         // deletion plus an addition.
         let b3 = BASE.replace("    1\n", "    11\n");
         let b3n = nodes(&b3, &[]);
-        let m3 = merge_nodes(Some((BASE, &bn)), (a, &an), (&b3, &b3n), &[], &[]);
+        let m3 = merge_nodes(
+            Language::Rust,
+            Some((BASE, &bn)),
+            (a, &an),
+            (&b3, &b3n),
+            &[],
+            &[],
+        );
         assert_eq!(m3.conflicts, vec!["function a".to_string()]);
     }
 
@@ -846,6 +913,42 @@ mod tests {
         assert_eq!(
             m.resolved,
             vec!["function count: parse renamed to parse_numbers".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rename_carried_across_the_merge_leaves_strings_comments_and_locals_alone() {
+        // A renames b to bee; B adds a unit that mentions b in a string, a
+        // comment, a local binding, a field, and a call. Only the call and
+        // the definition change.
+        let a = BASE.replace("fn b()", "fn bee()");
+        let b = format!(
+            "{BASE}\n/// Uses b.\nfn d(s: S) -> i32 {{\n    let name = \"b\"; // b\n    let b = s.b;\n    b + s.b() + {}()\n}}\n",
+            "b"
+        );
+        let m = merge(BASE, &a, &b);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let t = String::from_utf8(m.text).unwrap();
+        assert!(t.contains("fn bee() {"), "{t}");
+        assert!(
+            t.contains("/// Uses b.\nfn d(s: S) -> i32 {\n    let name = \"b\"; // b\n    let b = s.b;\n    b + s.b() + b()\n}"),
+            "a function that binds b itself keeps every b: {t}"
+        );
+        // The same caller without the local binding gets the call renamed
+        // and nothing else.
+        let b2 = format!(
+            "{BASE}\n/// Uses b.\nfn d(s: S) -> i32 {{\n    let name = \"b\"; // b\n    s.b + s.b() + b()\n}}\n"
+        );
+        let m2 = merge(BASE, &a, &b2);
+        assert!(m2.conflicts.is_empty(), "{:?}", m2.conflicts);
+        let t2 = String::from_utf8(m2.text).unwrap();
+        assert!(
+            t2.contains("/// Uses b.\nfn d(s: S) -> i32 {\n    let name = \"b\"; // b\n    s.b + s.bee() + bee()\n}"),
+            "{t2}"
+        );
+        assert_eq!(
+            m2.resolved,
+            vec!["function d: b renamed to bee".to_string()]
         );
     }
 

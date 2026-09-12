@@ -2007,9 +2007,12 @@ fn edit(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     )
 }
 
-/// The semantic operation `rename`: replace an identifier as a whole word
-/// in every tracked file with a grammar, or in one path, and record the op
-/// so the merge can carry it into concurrent changes.
+/// The semantic operation `rename`: replace an identifier where the parse
+/// says it names the unit, never in a string or a comment, in every
+/// tracked file with a grammar, or in one path, and record the op so the
+/// merge can carry it into concurrent changes. Refused when the new name
+/// already names a unit of the renamed unit's kind in a file the rename
+/// would touch: that would be a second definition.
 fn edit_rename(
     repo: &mut Repo,
     actor: &mut Actor,
@@ -2017,7 +2020,7 @@ fn edit_rename(
     from: &str,
     args: &Json,
 ) -> Result<Outcome> {
-    use tessra_semantic::rename::{is_ident, replace_ident};
+    use tessra_semantic::rename::{is_ident, rename_source, Rename};
     let to = arg_str(args, "to").ok_or_else(|| Error::verb("ARGS", "edit --rename needs to"))?;
     if !is_ident(from) || !is_ident(to) {
         return Err(Error::verb(
@@ -2034,31 +2037,65 @@ fn edit_rename(
     let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
     let dir = ws_path(ws);
     let files = fs::tracked_files(&dir, &rules)?;
-    let mut changed = Vec::new();
-    let mut out_of_scope = Vec::new();
+    let renames = [Rename::new(from, to)];
+    // Every file the rename touches, with its new text, before anything is
+    // written: the collision check below sees them all.
+    let mut touched: Vec<(String, std::path::PathBuf, Vec<u8>, Vec<u8>)> = Vec::new();
     for (rel, full) in files {
         if only.is_some_and(|p| p != rel) {
             continue;
         }
-        if tessra_semantic::Language::from_path(&rel).is_none() {
+        let Some(lang) = tessra_semantic::Language::from_path(&rel) else {
             continue;
-        }
+        };
         let bytes = std::fs::read(&full)?;
         if bytes.iter().take(8192).any(|&b| b == 0) {
             continue;
         }
-        if let Some(next) = replace_ident(&bytes, from, to) {
-            std::fs::write(&full, next)?;
-            let in_scope = actor
-                .write_paths
-                .as_ref()
-                .map(|ps| tessra_oplog::glob::any_match(ps, &rel))
-                .unwrap_or(true);
-            if !in_scope {
-                out_of_scope.push(rel.clone());
-            }
-            changed.push(rel);
+        let (next, applied) = rename_source(lang, &bytes, &renames);
+        if !applied.is_empty() {
+            touched.push((rel, full, bytes, next));
         }
+    }
+    // The kinds of unit `from` names in the touched files; `to` may not
+    // already name one of those kinds there, or any unit when `from` names
+    // none, since the renamed references would then bind to it.
+    let mut units: Vec<(String, tessra_semantic::RawNode)> = Vec::new();
+    for (rel, _, bytes, _) in &touched {
+        if let Ok(raw) = tessra_semantic::extract(rel, bytes) {
+            units.extend(raw.into_iter().map(|r| (rel.clone(), r)));
+        }
+    }
+    let kinds: Vec<&str> = units
+        .iter()
+        .filter(|(_, r)| r.name == from)
+        .map(|(_, r)| r.kind.as_str())
+        .collect();
+    if let Some((rel, existing)) = units
+        .iter()
+        .find(|(_, r)| r.name == to && (kinds.is_empty() || kinds.contains(&r.kind.as_str())))
+    {
+        return Err(Error::verb(
+            "RENAME",
+            format!(
+                "{to} already names a {} in {rel}; renaming {from} to it would define it twice",
+                existing.kind
+            ),
+        ));
+    }
+    let mut changed = Vec::new();
+    let mut out_of_scope = Vec::new();
+    for (rel, full, _, next) in touched {
+        std::fs::write(&full, next)?;
+        let in_scope = actor
+            .write_paths
+            .as_ref()
+            .map(|ps| tessra_oplog::glob::any_match(ps, &rel))
+            .unwrap_or(true);
+        if !in_scope {
+            out_of_scope.push(rel.clone());
+        }
+        changed.push(rel);
     }
     repo.push_pending_op(&ws.id, crate::semantic::rename_op(from, to, only))?;
     ok(
