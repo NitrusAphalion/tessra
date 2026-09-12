@@ -14,7 +14,7 @@ const VERBS: &[(&str, &str)] = &[
     ("edit", "Write a file (path, content), replace text (path, old, new, all?), or rename an identifier everywhere (rename, to, path?) as a recorded semantic operation the merge carries into concurrent changes. Plain file edits through other tools also count."),
     ("snapshot", "Record the workspace's state as a revision. Never blocks; flags tell you what will block promotion. then: verify | promote."),
     ("claim", "action: claim (paths, expires_s?, exclusive?, note?) | release (id?). Advisory; the response lists other claims that overlap yours, which means a merge is coming."),
-    ("remember", "Record a memory. kind: fact|decision|convention|gotcha|preference|task|question|summary|resolution. scope: {kind, ref}. body. confidence 0..1."),
+    ("remember", "Record a memory. kind: fact|decision|convention|gotcha|preference|task|question|summary|resolution. scope: {kind: path|unit|intent|repo, ref}; a session records path, unit (ref path:name), and intent memories, and repo, the default, is the owner's. body. confidence 0..1."),
     ("verify", "Run the verifiers the standard still needs (cached when the snapshot was verified before, selected by covering tests when possible) and report the standard clause by clause with what would satisfy each unmet one. full: run everything."),
     ("try", "Speculate: candidates [{path, content} | {path, old, new}, title?] are each materialized on your revision, verified, scored, and ranked; keep: <candidate> writes the winner into your workspace."),
     ("promote", "to: proposed | landed | <target> (with slice: canary | all). Refused with the unmet clauses if the standard does not hold."),

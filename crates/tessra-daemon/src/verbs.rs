@@ -2098,6 +2098,39 @@ fn remember(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         ),
         None => ("repo".into(), String::new()),
     };
+    // `unit` is the documented name of the `node` scope, `path:name`.
+    let scope_kind = if scope_kind == "unit" {
+        "node".to_string()
+    } else {
+        scope_kind
+    };
+    // A session's capability names the memory scopes it may write, and the
+    // default task grant leaves the repository out: repository-wide memory
+    // is the owner's. Say so here, with what to do instead, rather than
+    // letting the op be rejected at step 6 with nothing but `status`.
+    if let Some(cap_id) = actor.cap {
+        let cap: tessra_core::object::Capability = repo.store().get(&cap_id)?;
+        if let Some(scopes) = &cap.write.memory_scopes {
+            if !scopes.contains(&scope_kind) {
+                let allowed: Vec<&str> = scopes
+                    .iter()
+                    .map(|s| if s == "node" { "unit" } else { s.as_str() })
+                    .collect();
+                let instead = if scope_kind == "repo" {
+                    "repository-wide memory is the owner's: run `tessra remember` without --agent, or scope this one with --scope-kind path --scope-ref <path>"
+                } else {
+                    "use one of those"
+                };
+                return Err(Error::verb(
+                    "SCOPE",
+                    format!(
+                        "this session records {} memories, not {scope_kind}; {instead}",
+                        allowed.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
     let confidence = args.get("confidence").and_then(Json::as_f64).unwrap_or(0.8);
     let m = Memory {
         id: EntityId::random(),
@@ -5376,6 +5409,40 @@ mod tests {
             out["message"].as_str().unwrap_or("").contains("flags.none"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_session_is_told_which_memory_scopes_it_may_write() {
+        let (_dir, mut repo, _owner) = scratch();
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        // No scope means the repository, which the default grant leaves out.
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "x" }),
+        );
+        assert_eq!(out["ok"], json!(false), "{out}");
+        assert_eq!(out["code"], json!("SCOPE"), "{out}");
+        let message = out["message"].as_str().unwrap_or("");
+        assert!(message.contains("unit, path, intent"), "{out}");
+        assert!(message.contains("owner"), "{out}");
+        // The documented `unit` scope is accepted and stored as `node`.
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "x", "scope": { "kind": "unit", "ref": "src/a.rs:one" } }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["scope"]["kind"], json!("node"), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "x", "scope": { "kind": "path", "ref": "src" } }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
     }
 
     #[test]

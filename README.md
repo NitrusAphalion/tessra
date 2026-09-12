@@ -386,7 +386,7 @@ tessra remember --kind gotcha --body "must stay pure, the verifier runs it" --sc
 tessra remember --kind question --body "should retries be bounded?" --scope-kind intent --scope-ref <intent id>
 ```
 
-Kinds are `gotcha`, `decision`, `convention`, `question`, and `fact`. Scopes are the repository, a path, a unit written as `path:name`, or an intent. `context` recalls the memories that apply to what you are about to touch, `query --kind memory --scope <path>` lists them, and `undo` takes back one you regret. For tools that do not speak Tessra, render shared memory as a file:
+Kinds are `gotcha`, `decision`, `convention`, `question`, and `fact`. Scopes are the repository, a path, a unit written as `path:name`, or an intent. An agent session records path, unit, and intent memories; repository-wide memory is the owner's, since the task-scoped capability a session runs under does not carry that scope, and `remember` says so when a session tries. `context` recalls the memories that apply to what you are about to touch, `query --kind memory --scope <path>` lists them, and `undo` takes back one you regret. For tools that do not speak Tessra, render shared memory as a file:
 
 ```sh
 tessra export --format agents-md --path AGENTS.md    # or --format claude-md --path CLAUDE.md
