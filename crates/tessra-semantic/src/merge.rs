@@ -6,11 +6,22 @@
 //! are invisible because identity is by body hash, so an edit beats a
 //! reformat of the same unit and a reformat elsewhere is kept.
 //!
+//! Units line up across the three versions by node ID: each side's index
+//! was matched against the history it shares with the base, so a unit
+//! carries the base's ID through edits, renames, and reorders, and an
+//! overload inserted above its siblings shifts nothing. A recorded rename
+//! lines its unit up when identity could not follow it. Only what carries
+//! no shared ID, as when a side's index was built without history, falls
+//! back to `(kind, name, ordinal)`; what still lines up with nothing is an
+//! addition.
+//!
 //! Renames are the first semantic operation. One side's renames, recorded
 //! by `edit` or inferred from a unit keeping its identity under a new name,
 //! are applied to whatever the other side contributes, so a new call to the
 //! old name in a concurrent change comes out calling the new name. Each such
-//! application is reported as a resolved semantic conflict.
+//! application is reported as a resolved semantic conflict. A rename onto
+//! a name the base or the other side already gives a unit of the same kind
+//! at the same level is a conflict, not a second definition.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +29,7 @@ use tessra_core::object::Node;
 use tessra_core::{EntityId, ObjectId};
 
 use crate::matching::inferred_renames;
-use crate::rename::{apply_all, Rename};
+use crate::rename::{apply_all, is_ident, Rename};
 
 /// One version of a file with its nodes, which must be in document order
 /// with parents before children.
@@ -40,13 +51,9 @@ pub struct Merged {
     pub resolved: Vec<String>,
 }
 
-type Key = (String, String, usize);
-
 #[derive(Clone, Debug)]
 struct Unit {
-    /// `(kind, name as known to the base, ordinal)`: a renamed unit keys by
-    /// its old name so it lines up with the base and the other side.
-    key: Key,
+    nid: EntityId,
     kind: String,
     name: String,
     span: (usize, usize),
@@ -56,7 +63,17 @@ struct Unit {
     children: Vec<Unit>,
 }
 
-fn build_units(nodes: &[Node], match_names: &HashMap<EntityId, String>) -> Vec<Unit> {
+/// How a unit lines up across the three versions of one level: as the base
+/// unit whose ID it carries or stands in for, or as an addition, keyed by
+/// kind, name, and ordinal among the side's additions of that kind and
+/// name, so the same addition made on both sides lands once.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    Id(EntityId),
+    New(String, String, usize),
+}
+
+fn build_units(nodes: &[Node]) -> Vec<Unit> {
     let mut by_parent: HashMap<Option<EntityId>, Vec<&Node>> = HashMap::new();
     for n in nodes {
         by_parent.entry(n.parent).or_default().push(n);
@@ -64,18 +81,11 @@ fn build_units(nodes: &[Node], match_names: &HashMap<EntityId, String>) -> Vec<U
     fn make(
         list: &[&Node],
         by_parent: &HashMap<Option<EntityId>, Vec<&Node>>,
-        match_names: &HashMap<EntityId, String>,
         region_start: usize,
     ) -> Vec<Unit> {
-        let mut counts: HashMap<(String, String), usize> = HashMap::new();
         let mut out = Vec::new();
         let mut prev_end = region_start;
         for n in list {
-            let key_name = match_names.get(&n.nid).unwrap_or(&n.name).clone();
-            let ord = *counts
-                .entry((n.kind.clone(), key_name.clone()))
-                .and_modify(|c| *c += 1)
-                .or_insert(0);
             let span = (n.span.0 as usize, n.span.1 as usize);
             let kids = by_parent
                 .get(&Some(n.nid))
@@ -83,20 +93,110 @@ fn build_units(nodes: &[Node], match_names: &HashMap<EntityId, String>) -> Vec<U
                 .unwrap_or(&[]);
             let first_kid_start = kids.first().map(|k| k.span.0 as usize).unwrap_or(span.1);
             out.push(Unit {
-                key: (n.kind.clone(), key_name, ord),
+                nid: n.nid,
                 kind: n.kind.clone(),
                 name: n.name.clone(),
                 span,
                 body: n.body,
                 gap_start: prev_end,
-                children: make(kids, by_parent, match_names, first_kid_start),
+                children: make(kids, by_parent, first_kid_start),
             });
             prev_end = span.1;
         }
         out
     }
     let top = by_parent.get(&None).map(|v| v.as_slice()).unwrap_or(&[]);
-    make(top, &by_parent, match_names, 0)
+    make(top, &by_parent, 0)
+}
+
+/// One key per unit of a side at one level. A unit is the base unit whose
+/// ID it carries; failing that, the base unit a recorded rename says it
+/// was, when the body changed too and identity could not follow; failing
+/// that, the base unit of its kind and name it stands in for, by body and
+/// then by position, which is all that lines up when a side's index was
+/// built without history. What is left is an addition.
+fn keys(base: Option<&[Unit]>, side: &[Unit], recorded: &[Rename]) -> Vec<Key> {
+    let base = base.unwrap_or(&[]);
+    let mut out: Vec<Option<Key>> = vec![None; side.len()];
+    let mut taken = vec![false; base.len()];
+    let by_nid: HashMap<EntityId, usize> =
+        base.iter().enumerate().map(|(i, u)| (u.nid, i)).collect();
+    for (i, u) in side.iter().enumerate() {
+        if let Some(&b) = by_nid.get(&u.nid) {
+            if !taken[b] {
+                taken[b] = true;
+                out[i] = Some(Key::Id(u.nid));
+            }
+        }
+    }
+    for r in recorded {
+        let Some(b) = base
+            .iter()
+            .position(|u| u.name == r.from && !taken[by_nid[&u.nid]])
+        else {
+            continue;
+        };
+        // The rename happened at this level only if nothing here still
+        // carries the old name.
+        if side
+            .iter()
+            .any(|u| u.name == r.from && u.kind == base[b].kind)
+        {
+            continue;
+        }
+        let found = side
+            .iter()
+            .enumerate()
+            .find(|(i, u)| out[*i].is_none() && u.name == r.to && u.kind == base[b].kind)
+            .map(|(i, _)| i);
+        if let Some(i) = found {
+            taken[b] = true;
+            out[i] = Some(Key::Id(base[b].nid));
+        }
+    }
+    // By kind and name among what is left, the same body first.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for (i, u) in side.iter().enumerate() {
+        if out[i].is_some() || !seen.insert((u.kind.clone(), u.name.clone())) {
+            continue;
+        }
+        let members: Vec<usize> = (i..side.len())
+            .filter(|&j| out[j].is_none() && side[j].kind == u.kind && side[j].name == u.name)
+            .collect();
+        let mut candidates: Vec<usize> = (0..base.len())
+            .filter(|&b| !taken[b] && base[b].kind == u.kind && base[b].name == u.name)
+            .collect();
+        for &j in &members {
+            if let Some(pos) = candidates
+                .iter()
+                .position(|&b| base[b].body == side[j].body)
+            {
+                let b = candidates.remove(pos);
+                taken[b] = true;
+                out[j] = Some(Key::Id(base[b].nid));
+            }
+        }
+        let mut rest = candidates.into_iter();
+        for &j in &members {
+            if out[j].is_none() {
+                if let Some(b) = rest.next() {
+                    taken[b] = true;
+                    out[j] = Some(Key::Id(base[b].nid));
+                }
+            }
+        }
+    }
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for (i, u) in side.iter().enumerate() {
+        if out[i].is_none() {
+            let k = *counts
+                .entry((u.kind.clone(), u.name.clone()))
+                .and_modify(|c| *c += 1)
+                .or_insert(0);
+            out[i] = Some(Key::New(u.kind.clone(), u.name.clone(), k));
+        }
+    }
+    out.into_iter().map(Option::unwrap).collect()
 }
 
 /// Merge one file. `base` is None when both sides added the file. `ops_a`
@@ -112,9 +212,6 @@ pub fn merge_file(
     let base_nodes: &[Node] = base.map(|f| f.nodes).unwrap_or(&[]);
     let inferred_a = inferred_renames("", base_nodes, a.nodes);
     let inferred_b = inferred_renames("", base_nodes, b.nodes);
-    let match_names = |inf: &[(EntityId, Rename)]| -> HashMap<EntityId, String> {
-        inf.iter().map(|(nid, r)| (*nid, r.from.clone())).collect()
-    };
     let renames = |inf: Vec<(EntityId, Rename)>, ops: &[Rename]| -> Vec<Rename> {
         let mut out: Vec<Rename> = inf.into_iter().map(|(_, r)| r).collect();
         for r in ops {
@@ -124,40 +221,17 @@ pub fn merge_file(
         }
         out
     };
-    let mut names_a = match_names(&inferred_a);
-    let mut names_b = match_names(&inferred_b);
-    // A recorded rename lines up its unit with the base even when the body
-    // changed too and identity could not follow it.
-    for (ops, side_nodes, names) in [
-        (ops_a, a.nodes, &mut names_a),
-        (ops_b, b.nodes, &mut names_b),
-    ] {
-        for r in ops {
-            let Some(old) = base_nodes.iter().find(|n| n.name == r.from) else {
-                continue;
-            };
-            if side_nodes
-                .iter()
-                .any(|n| n.name == r.from && n.kind == old.kind)
-            {
-                continue;
-            }
-            if let Some(new) = side_nodes.iter().find(|n| {
-                n.name == r.to && n.kind == old.kind && n.parent.is_none() == old.parent.is_none()
-            }) {
-                names.entry(new.nid).or_insert_with(|| r.from.clone());
-            }
-        }
-    }
-    let bu = base.map(|f| build_units(f.nodes, &HashMap::new()));
-    let au = build_units(a.nodes, &names_a);
-    let bbu = build_units(b.nodes, &names_b);
+    let bu = base.map(|f| build_units(f.nodes));
+    let au = build_units(a.nodes);
+    let bbu = build_units(b.nodes);
     let ctx = Ctx {
         base: base.map(|f| f.text),
         a: a.text,
         b: b.text,
         ren_a: renames(inferred_a, ops_a),
         ren_b: renames(inferred_b, ops_b),
+        ops_a: ops_a.to_vec(),
+        ops_b: ops_b.to_vec(),
     };
     let mut m = Merged::default();
     let mut out = Vec::new();
@@ -183,8 +257,14 @@ struct Ctx<'a> {
     base: Option<&'a [u8]>,
     a: &'a [u8],
     b: &'a [u8],
+    /// Every rename a side made, recorded or inferred: what is applied to
+    /// the other side's text.
     ren_a: Vec<Rename>,
     ren_b: Vec<Rename>,
+    /// The renames a side recorded: what lines a unit up with the base
+    /// when identity could not.
+    ops_a: Vec<Rename>,
+    ops_b: Vec<Rename>,
 }
 
 impl Ctx<'_> {
@@ -199,6 +279,13 @@ impl Ctx<'_> {
         match side {
             Side::A => &self.ren_a,
             Side::B => &self.ren_b,
+        }
+    }
+
+    fn recorded(&self, side: Side) -> &[Rename] {
+        match side {
+            Side::A => &self.ops_a,
+            Side::B => &self.ops_b,
         }
     }
 }
@@ -222,17 +309,15 @@ impl Side {
 /// additions placed after the unit that preceded them on their side.
 /// Additions both sides made after the same unit keep landing order: the
 /// first side's run stays ahead of the second's.
-fn ordered_keys(base: Option<&[Unit]>, a: &[Unit], b: &[Unit]) -> Vec<Key> {
-    let mut result: Vec<Key> = base
-        .map(|u| u.iter().map(|x| x.key.clone()).collect())
-        .unwrap_or_default();
+fn ordered_keys(base: &[Key], a: &[Key], b: &[Key]) -> Vec<Key> {
+    let mut result: Vec<Key> = base.to_vec();
     let in_base: HashSet<Key> = result.iter().cloned().collect();
     let mut present = in_base.clone();
     for side in [a, b] {
         let mut prev_in_result: Option<Key> = None;
-        for u in side {
-            if present.contains(&u.key) {
-                prev_in_result = Some(u.key.clone());
+        for key in side {
+            if present.contains(key) {
+                prev_in_result = Some(key.clone());
                 continue;
             }
             let mut pos = match &prev_in_result {
@@ -246,16 +331,28 @@ fn ordered_keys(base: Option<&[Unit]>, a: &[Unit], b: &[Unit]) -> Vec<Key> {
             while pos < result.len() && !in_base.contains(&result[pos]) {
                 pos += 1;
             }
-            result.insert(pos, u.key.clone());
-            present.insert(u.key.clone());
-            prev_in_result = Some(u.key.clone());
+            result.insert(pos, key.clone());
+            present.insert(key.clone());
+            prev_in_result = Some(key.clone());
         }
     }
     result
 }
 
-fn find<'u>(units: &'u [Unit], key: &Key) -> Option<&'u Unit> {
-    units.iter().find(|u| &u.key == key)
+/// One level of one version: its units and their keys, aligned.
+#[derive(Clone, Copy)]
+struct Level<'u> {
+    units: &'u [Unit],
+    keys: &'u [Key],
+}
+
+impl<'u> Level<'u> {
+    fn find(&self, key: &Key) -> Option<&'u Unit> {
+        self.keys
+            .iter()
+            .position(|k| k == key)
+            .map(|i| &self.units[i])
+    }
 }
 
 fn slice(text: &[u8], from: usize, to: usize) -> &[u8] {
@@ -264,11 +361,49 @@ fn slice(text: &[u8], from: usize, to: usize) -> &[u8] {
     &text[from..to]
 }
 
+/// The gap before a unit in the merged output: the text before it on a
+/// side where it follows the unit it follows in the output, `prefer`
+/// first, so an insertion above the first member of a container brings
+/// the separator between them and the member keeps its own lead-in; the
+/// preferred side's own gap when neither side lines up.
+fn gap_before<'c>(
+    ctx: &'c Ctx<'_>,
+    level_a: Level<'_>,
+    level_b: Level<'_>,
+    key: &Key,
+    prefer: Side,
+    last: Option<&Key>,
+) -> &'c [u8] {
+    let level_of = |side: Side| match side {
+        Side::A => level_a,
+        Side::B => level_b,
+    };
+    for side in [prefer, prefer.other()] {
+        let level = level_of(side);
+        let Some(i) = level.keys.iter().position(|k| k == key) else {
+            continue;
+        };
+        let pred = if i == 0 {
+            None
+        } else {
+            Some(&level.keys[i - 1])
+        };
+        if pred == last {
+            let u = &level.units[i];
+            return slice(ctx.text(side), u.gap_start, u.span.0);
+        }
+    }
+    let u = level_of(prefer)
+        .find(key)
+        .expect("a unit is emitted from a side that holds it");
+    slice(ctx.text(prefer), u.gap_start, u.span.0)
+}
+
 /// Emit a unit's gap and text from one side, with the other side's renames
 /// applied to it. Every rename that changed something is reported.
-fn emit_leaf(ctx: &Ctx<'_>, side: Side, u: &Unit, out: &mut Vec<u8>, m: &mut Merged) {
+fn emit_leaf(ctx: &Ctx<'_>, side: Side, u: &Unit, gap: &[u8], out: &mut Vec<u8>, m: &mut Merged) {
     let text = ctx.text(side);
-    push_gap(out, slice(text, u.gap_start, u.span.0));
+    push_gap(out, gap);
     let body = slice(text, u.span.0, u.span.1);
     let (fixed, applied) = apply_all(body, ctx.renames(side.other()));
     for r in applied {
@@ -331,37 +466,99 @@ fn merge_level(
     out: &mut Vec<u8>,
     m: &mut Merged,
 ) {
-    // A unit added on one side under a name the other side renamed something
-    // to would collide with the renamed unit.
-    for (side, units) in [(Side::A, a), (Side::B, b)] {
-        for u in units {
-            let added = base.map(|bu| find(bu, &u.key).is_none()).unwrap_or(true);
-            if added && u.key.1 == u.name {
-                if let Some(r) = ctx.renames(side.other()).iter().find(|r| r.to == u.name) {
-                    m.conflicts.push(format!(
-                        "{} {} (added on one side, {} renamed to it on the other)",
-                        u.kind, u.name, r.from
-                    ));
+    let base_keys: Vec<Key> = base
+        .map(|u| u.iter().map(|x| Key::Id(x.nid)).collect())
+        .unwrap_or_default();
+    let keys_a = keys(base, a, ctx.recorded(Side::A));
+    let keys_b = keys(base, b, ctx.recorded(Side::B));
+    let base_level = base.map(|units| Level {
+        units,
+        keys: &base_keys,
+    });
+    let level_a = Level {
+        units: a,
+        keys: &keys_a,
+    };
+    let level_b = Level {
+        units: b,
+        keys: &keys_b,
+    };
+    for (side, level) in [(Side::A, level_a), (Side::B, level_b)] {
+        let other = match side {
+            Side::A => level_b,
+            Side::B => level_a,
+        };
+        for (u, key) in level.units.iter().zip(level.keys) {
+            match key {
+                // A unit added on one side under a name the other side
+                // renamed something to would collide with the renamed unit.
+                Key::New(..) => {
+                    if let Some(r) = ctx.renames(side.other()).iter().find(|r| r.to == u.name) {
+                        m.conflicts.push(format!(
+                            "{} {} (added on one side, {} renamed to it on the other)",
+                            u.kind, u.name, r.from
+                        ));
+                    }
+                }
+                // A unit renamed onto a name the base already gives another
+                // unit of its kind, or that the other side renamed a
+                // different unit to, would be a second definition.
+                Key::Id(nid) => {
+                    let Some(b0) = base_level.and_then(|l| l.find(key)) else {
+                        continue;
+                    };
+                    if u.name == b0.name || !is_ident(&u.name) {
+                        continue;
+                    }
+                    let in_base = base_level.and_then(|l| {
+                        l.units
+                            .iter()
+                            .find(|x| x.nid != *nid && x.kind == u.kind && x.name == u.name)
+                    });
+                    if in_base.is_some() {
+                        m.conflicts.push(format!(
+                            "{} {} (renamed to {}, which the base already defines)",
+                            u.kind, b0.name, u.name
+                        ));
+                        continue;
+                    }
+                    let elsewhere = other.units.iter().zip(other.keys).find(|(x, k)| {
+                        x.kind == u.kind && x.name == u.name && matches!(k, Key::Id(o) if o != nid)
+                    });
+                    if let Some((_, Key::Id(o))) = elsewhere {
+                        let from = base_level
+                            .and_then(|l| l.find(&Key::Id(*o)))
+                            .map(|x| x.name.clone())
+                            .unwrap_or_default();
+                        m.conflicts.push(format!(
+                            "{} {} (renamed to {} on one side, {} renamed to it on the other)",
+                            u.kind, b0.name, u.name, from
+                        ));
+                    }
                 }
             }
         }
     }
-    for key in ordered_keys(base, a, b) {
-        let bu = base.and_then(|u| find(u, &key));
-        let au = find(a, &key);
-        let bbu = find(b, &key);
+    // The key last emitted at this level, for choosing each unit's gap.
+    let mut last: Option<Key> = None;
+    for key in ordered_keys(&base_keys, &keys_a, &keys_b) {
+        let bu = base_level.and_then(|l| l.find(&key));
+        let au = level_a.find(&key);
+        let bbu = level_b.find(&key);
+        let gap = |prefer: Side| gap_before(ctx, level_a, level_b, &key, prefer, last.as_ref());
+        let before = out.len();
         match (bu, au, bbu) {
             (_, None, None) => {}
-            (None, Some(x), None) => emit_leaf(ctx, Side::A, x, out, m),
-            (None, None, Some(y)) => emit_leaf(ctx, Side::B, y, out, m),
+            (None, Some(x), None) => emit_leaf(ctx, Side::A, x, gap(Side::A), out, m),
+            (None, None, Some(y)) => emit_leaf(ctx, Side::B, y, gap(Side::B), out, m),
             (None, Some(x), Some(y)) => {
                 if x.body == y.body {
-                    emit_leaf(ctx, Side::A, x, out, m);
+                    emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                 } else if !x.children.is_empty() && !y.children.is_empty() {
-                    merge_container(ctx, None, x, y, out, m);
+                    merge_container(ctx, None, x, y, gap(Side::A), gap(Side::B), out, m);
                 } else {
                     m.conflicts.push(format!("{} {}", x.kind, x.name));
-                    emit_leaf(ctx, Side::A, x, out, m);
+                    emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                 }
             }
             (Some(b0), None, Some(y)) => {
@@ -370,7 +567,7 @@ fn merge_level(
                         "{} {} (deleted on one side, changed on the other)",
                         y.kind, y.name
                     ));
-                    emit_leaf(ctx, Side::B, y, out, m);
+                    emit_leaf(ctx, Side::B, y, gap(Side::B), out, m);
                 }
             }
             (Some(b0), Some(x), None) => {
@@ -379,7 +576,7 @@ fn merge_level(
                         "{} {} (deleted on one side, changed on the other)",
                         x.kind, x.name
                     ));
-                    emit_leaf(ctx, Side::A, x, out, m);
+                    emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                 }
             }
             (Some(b0), Some(x), Some(y)) => {
@@ -393,31 +590,40 @@ fn merge_level(
                             .map(|t| slice(t, b0.span.0, b0.span.1))
                             .unwrap_or(&[]);
                         if slice(ctx.a, x.span.0, x.span.1) != base_text {
-                            emit_leaf(ctx, Side::A, x, out, m);
+                            emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                         } else {
-                            emit_leaf(ctx, Side::B, y, out, m);
+                            emit_leaf(ctx, Side::B, y, gap(Side::B), out, m);
                         }
                     }
-                    (true, false) => emit_leaf(ctx, Side::A, x, out, m),
-                    (false, true) => emit_leaf(ctx, Side::B, y, out, m),
+                    (true, false) => emit_leaf(ctx, Side::A, x, gap(Side::A), out, m),
+                    (false, true) => emit_leaf(ctx, Side::B, y, gap(Side::B), out, m),
                     (true, true) => {
                         if x.body == y.body && x.name == y.name {
-                            emit_leaf(ctx, Side::A, x, out, m);
+                            emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                         } else if x.name != b0.name && y.name != b0.name && x.name != y.name {
                             m.conflicts.push(format!(
                                 "{} {} (renamed to {} on one side and {} on the other)",
                                 b0.kind, b0.name, x.name, y.name
                             ));
-                            emit_leaf(ctx, Side::A, x, out, m);
+                            emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                         } else if change_is_renames(ctx, Side::A, b0, x) {
-                            emit_leaf(ctx, Side::B, y, out, m);
+                            emit_leaf(ctx, Side::B, y, gap(Side::B), out, m);
                         } else if change_is_renames(ctx, Side::B, b0, y) {
-                            emit_leaf(ctx, Side::A, x, out, m);
+                            emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                         } else if !x.children.is_empty()
                             && !y.children.is_empty()
                             && !b0.children.is_empty()
                         {
-                            merge_container(ctx, Some(b0), x, y, out, m);
+                            merge_container(
+                                ctx,
+                                Some(b0),
+                                x,
+                                y,
+                                gap(Side::A),
+                                gap(Side::B),
+                                out,
+                                m,
+                            );
                         } else {
                             let reason = if x.name != b0.name || y.name != b0.name {
                                 " (renamed on one side, changed on the other)"
@@ -426,35 +632,38 @@ fn merge_level(
                             };
                             m.conflicts
                                 .push(format!("{} {}{}", b0.kind, b0.name, reason));
-                            emit_leaf(ctx, Side::A, x, out, m);
+                            emit_leaf(ctx, Side::A, x, gap(Side::A), out, m);
                         }
                     }
                 }
             }
         }
+        if out.len() != before {
+            last = Some(key);
+        }
     }
 }
 
 /// Both sides changed a container differently: keep the header and footer
-/// from whichever side changed them, and merge the children.
+/// from whichever side changed them, and merge the children. `gap_a` and
+/// `gap_b` are the container's gap when its header comes from A or B.
+#[allow(clippy::too_many_arguments)]
 fn merge_container(
     ctx: &Ctx<'_>,
     base: Option<&Unit>,
     x: &Unit,
     y: &Unit,
+    gap_a: &[u8],
+    gap_b: &[u8],
     out: &mut Vec<u8>,
     m: &mut Merged,
 ) {
     let base_header = base.and_then(|b| ctx.base.map(|t| header(t, b)));
     let a_header = header(ctx.a, x);
     let b_header = header(ctx.b, y);
-    let (gap_side, head) = match base_header {
-        Some(bh) if a_header == bh => (Side::B, b_header),
-        _ => (Side::A, a_header),
-    };
-    let gap_text = match gap_side {
-        Side::A => slice(ctx.a, x.gap_start, x.span.0),
-        Side::B => slice(ctx.b, y.gap_start, y.span.0),
+    let (gap_side, head, gap_text) = match base_header {
+        Some(bh) if a_header == bh => (Side::B, b_header, gap_b),
+        _ => (Side::A, a_header, gap_a),
     };
     push_gap(out, gap_text);
     let (head, applied) = apply_all(head, ctx.renames(gap_side.other()));
@@ -485,38 +694,189 @@ fn merge_container(
 mod tests {
     use super::*;
     use crate::extract::with_grammar;
-    use crate::matching::assign_ids;
+    use crate::matching::assign_ids_with_refs;
     use crate::Language;
 
-    fn nodes(src: &str, prev: &[Node]) -> Vec<Node> {
-        let raw = with_grammar(Language::Rust, src.as_bytes()).unwrap();
-        assign_ids("f.rs", &raw, prev)
+    /// Nodes of one version, matched against the previous version's nodes
+    /// and text as the daemon matches them at snapshot time.
+    fn nodes_in(lang: Language, src: &str, prev: &[Node], prev_src: Option<&str>) -> Vec<Node> {
+        let path = match lang {
+            Language::Rust => "f.rs",
+            Language::Python => "f.py",
+            Language::JavaScript => "f.js",
+            Language::TypeScript => "f.ts",
+            Language::Tsx => "f.tsx",
+        };
+        let raw = with_grammar(lang, src.as_bytes()).unwrap();
+        assign_ids_with_refs(path, &raw, prev, prev_src.map(str::as_bytes)).0
     }
 
-    fn merge_ops(base: &str, a: &str, b: &str, ops_a: &[Rename], ops_b: &[Rename]) -> Merged {
-        let bn = nodes(base, &[]);
-        let an = nodes(a, &bn);
-        let bbn = nodes(b, &bn);
+    fn nodes(src: &str, prev: &[Node]) -> Vec<Node> {
+        nodes_in(Language::Rust, src, prev, None)
+    }
+
+    fn merge_nodes(
+        base: Option<(&str, &[Node])>,
+        a: (&str, &[Node]),
+        b: (&str, &[Node]),
+        ops_a: &[Rename],
+        ops_b: &[Rename],
+    ) -> Merged {
         merge_file(
-            Some(FileNodes {
-                text: base.as_bytes(),
-                nodes: &bn,
+            base.map(|(text, nodes)| FileNodes {
+                text: text.as_bytes(),
+                nodes,
             }),
             FileNodes {
-                text: a.as_bytes(),
-                nodes: &an,
+                text: a.0.as_bytes(),
+                nodes: a.1,
             },
             FileNodes {
-                text: b.as_bytes(),
-                nodes: &bbn,
+                text: b.0.as_bytes(),
+                nodes: b.1,
             },
             ops_a,
             ops_b,
         )
     }
 
+    fn merge_in(
+        lang: Language,
+        base: &str,
+        a: &str,
+        b: &str,
+        ops_a: &[Rename],
+        ops_b: &[Rename],
+    ) -> Merged {
+        let bn = nodes_in(lang, base, &[], None);
+        let an = nodes_in(lang, a, &bn, Some(base));
+        let bbn = nodes_in(lang, b, &bn, Some(base));
+        merge_nodes(Some((base, &bn)), (a, &an), (b, &bbn), ops_a, ops_b)
+    }
+
+    fn merge_ops(base: &str, a: &str, b: &str, ops_a: &[Rename], ops_b: &[Rename]) -> Merged {
+        merge_in(Language::Rust, base, a, b, ops_a, ops_b)
+    }
+
     fn merge(base: &str, a: &str, b: &str) -> Merged {
         merge_ops(base, a, b, &[], &[])
+    }
+
+    #[test]
+    fn same_named_siblings_do_not_drift() {
+        // Three overloads of m; one side inserts a fourth above them, the
+        // other edits the implementation below. Ordinals shifted, IDs did
+        // not: no conflict, and both changes land.
+        let base = "class K {\n  m(a: string): void;\n  m(a: number): void;\n  m(a: any) { return a; }\n}\n";
+        let a = base.replace("  m(a: string)", "  m(a: boolean): void;\n  m(a: string)");
+        let b = base.replace("return a;", "return a + 1;");
+        let m = merge_in(Language::TypeScript, base, &a, &b, &[], &[]);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let t = String::from_utf8(m.text).unwrap();
+        assert_eq!(
+            t,
+            "class K {\n  m(a: boolean): void;\n  m(a: string): void;\n  m(a: number): void;\n  m(a: any) { return a + 1; }\n}\n"
+        );
+        // The other landing order gives the same file.
+        let m2 = merge_in(Language::TypeScript, base, &b, &a, &[], &[]);
+        assert!(m2.conflicts.is_empty(), "{:?}", m2.conflicts);
+        assert_eq!(String::from_utf8(m2.text).unwrap(), t);
+    }
+
+    #[test]
+    fn a_member_inserted_above_the_first_keeps_the_separator() {
+        // A field's comma is not part of its span; it lives in the gap
+        // before the next field, which the inserting side supplies.
+        let base = "struct S {\n    a: i32,\n}\n";
+        let a = "struct S {\n    z: u8,\n    a: i32,\n}\n";
+        let b = "struct S {\n    a: i64,\n}\n";
+        let m = merge(base, a, b);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            String::from_utf8(m.text).unwrap(),
+            "struct S {\n    z: u8,\n    a: i64,\n}\n"
+        );
+    }
+
+    #[test]
+    fn units_line_up_by_id_and_fall_back_to_name_without_one() {
+        // A reorders and edits a; B edits c. By ID nothing drifts.
+        let a =
+            "use std::fmt;\n\nfn c() {\n    3\n}\n\nfn a() {\n    10\n}\n\nfn b() {\n    2\n}\n";
+        let b = BASE.replace("    3\n", "    30\n");
+        let m = merge(BASE, a, &b);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let t = String::from_utf8(m.text).unwrap();
+        assert!(t.contains("fn a() {\n    10\n}"), "{t}");
+        assert!(t.contains("fn c() {\n    30\n}"), "{t}");
+        // B's index was built without history, so it shares no ID with the
+        // base: its units still line up by kind and name.
+        let bn = nodes(BASE, &[]);
+        let an = nodes(a, &bn);
+        let bbn = nodes(&b, &[]);
+        assert!(bbn.iter().all(|n| bn.iter().all(|p| p.nid != n.nid)));
+        let m2 = merge_nodes(Some((BASE, &bn)), (a, &an), (&b, &bbn), &[], &[]);
+        assert!(m2.conflicts.is_empty(), "{:?}", m2.conflicts);
+        assert_eq!(String::from_utf8(m2.text).unwrap(), t);
+        // And on that side a changed unit is still a change, not a
+        // deletion plus an addition.
+        let b3 = BASE.replace("    1\n", "    11\n");
+        let b3n = nodes(&b3, &[]);
+        let m3 = merge_nodes(Some((BASE, &bn)), (a, &an), (&b3, &b3n), &[], &[]);
+        assert_eq!(m3.conflicts, vec!["function a".to_string()]);
+    }
+
+    #[test]
+    fn a_rename_with_an_edit_carries_to_the_other_sides_caller() {
+        // A renames parse to parse_numbers and adds a line in the same
+        // step, with no recorded op; B adds a caller of parse. Identity
+        // follows by similarity, so the caller comes out renamed.
+        let base = "fn a() { 1 }\n\nfn parse(input: &str) -> Vec<u32> {\n    let mut out = Vec::new();\n    for part in input.split(',') {\n        if let Ok(n) = part.trim().parse::<u32>() {\n            out.push(n);\n        }\n    }\n    out\n}\n";
+        let a = base
+            .replace("fn parse(", "fn parse_numbers(")
+            .replace("    out\n}", "    out.sort();\n    out\n}");
+        let b = format!("{base}\nfn count(s: &str) -> usize {{ parse(s).len() }}\n");
+        let m = merge(base, &a, &b);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        let t = String::from_utf8(m.text).unwrap();
+        assert!(t.contains("fn parse_numbers(input"), "{t}");
+        assert!(t.contains("    out.sort();\n    out\n}"), "{t}");
+        assert!(t.contains("{ parse_numbers(s).len() }"), "{t}");
+        assert!(!t.contains("fn parse("), "{t}");
+        assert_eq!(
+            m.resolved,
+            vec!["function count: parse renamed to parse_numbers".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rename_onto_an_existing_name_conflicts() {
+        // The base already defines bee; A renames b to bee.
+        let base = format!("{BASE}\nfn bee() {{ 9 }}\n");
+        let a = base.replace("fn b()", "fn bee()");
+        let b = base.replace("    3\n", "    30\n");
+        let m = merge(&base, &a, &b);
+        assert_eq!(m.conflicts.len(), 1, "{:?}", m.conflicts);
+        assert!(
+            m.conflicts[0].contains("renamed to bee, which the base already defines"),
+            "{:?}",
+            m.conflicts
+        );
+        // Both sides renamed different units to the same name.
+        let a2 = BASE.replace("fn b()", "fn x()");
+        let b2 = BASE.replace("fn c()", "fn x()");
+        let m2 = merge(BASE, &a2, &b2);
+        assert_eq!(m2.conflicts.len(), 2, "{:?}", m2.conflicts);
+        assert!(
+            m2.conflicts
+                .iter()
+                .all(|c| c.contains("renamed to x on one side")),
+            "{:?}",
+            m2.conflicts
+        );
+        // The same unit renamed the same way on both sides is not a collision.
+        let m3 = merge(BASE, &a2, &a2);
+        assert!(m3.conflicts.is_empty(), "{:?}", m3.conflicts);
     }
 
     const BASE: &str =

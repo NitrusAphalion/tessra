@@ -157,9 +157,48 @@ pub fn build_nodes(
     Ok(out)
 }
 
+/// The aliases the given indexes carry, merged-away ID to survivor, so a
+/// unit a landing merged under another ID lines up with itself on every
+/// side of a later merge.
+fn aliases_of(indexes: &[Option<&NodeIndex>]) -> HashMap<EntityId, EntityId> {
+    let mut map = HashMap::new();
+    for idx in indexes.iter().flatten() {
+        if let Some(aliases) = &idx.aliases {
+            for (k, v) in aliases {
+                if let Ok(k) = EntityId::from_slice(k) {
+                    map.insert(k, *v);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// The nodes with their IDs and parents resolved through `aliases`.
+fn canonical(mut nodes: Vec<Node>, aliases: &HashMap<EntityId, EntityId>) -> Vec<Node> {
+    if aliases.is_empty() {
+        return nodes;
+    }
+    let resolve = |mut id: EntityId| {
+        for _ in 0..64 {
+            match aliases.get(&id) {
+                Some(next) if *next != id => id = *next,
+                _ => break,
+            }
+        }
+        id
+    };
+    for n in nodes.iter_mut() {
+        n.nid = resolve(n.nid);
+        n.parent = n.parent.map(resolve);
+    }
+    nodes
+}
+
 /// The renames a side made relative to the base, inferred from unit
 /// identity across the whole index, with the path each was seen in.
 pub fn renames_between(base: &NodeIndex, side: &NodeIndex) -> Vec<Rename> {
+    let aliases = aliases_of(&[Some(base), Some(side)]);
     let mut by_path_base: HashMap<&str, Vec<Node>> = HashMap::new();
     for n in &base.nodes {
         by_path_base
@@ -173,6 +212,11 @@ pub fn renames_between(base: &NodeIndex, side: &NodeIndex) -> Vec<Rename> {
             .entry(n.path.as_str())
             .or_default()
             .push(n.clone());
+    }
+    if !aliases.is_empty() {
+        for nodes in by_path_base.values_mut().chain(by_path_side.values_mut()) {
+            *nodes = canonical(std::mem::take(nodes), &aliases);
+        }
     }
     let mut out = Vec::new();
     for (path, after) in &by_path_side {
@@ -522,6 +566,9 @@ pub fn merge_trees(
     let (mut merged, path_conflicts) = tree::merge3(base, a, b);
     let mut conflicts = Vec::new();
     let mut resolved = Vec::new();
+    // Units line up by node ID in the merge, resolved through whatever
+    // aliases the three indexes wrote at earlier landings.
+    let aliases = aliases_of(&[base_idx, Some(a_idx), Some(b_idx)]);
     // Files only one side changed: carry the other side's renames into them.
     let mut carried: Vec<(String, ObjectId, Vec<u8>)> = Vec::new();
     for (path, leaf) in &merged {
@@ -580,15 +627,15 @@ pub fn merge_trees(
         }
         let ta = store.get_bytes(&ra)?.unwrap_or_default();
         let tb = store.get_bytes(&rb)?.unwrap_or_default();
-        let na = nodes_for_path(a_idx, &path);
-        let nb = nodes_for_path(b_idx, &path);
+        let na = canonical(nodes_for_path(a_idx, &path), &aliases);
+        let nb = canonical(nodes_for_path(b_idx, &path), &aliases);
         let base_leaf = base.get(&path).filter(|l| l.kind == EntryKind::File);
         let base_text = match base_leaf.and_then(|l| l.r#ref) {
             Some(r) => store.get_bytes(&r)?,
             None => None,
         };
         let base_nodes = base_idx
-            .map(|i| nodes_for_path(i, &path))
+            .map(|i| canonical(nodes_for_path(i, &path), &aliases))
             .unwrap_or_default();
         let base_fn = match (&base_text, base_leaf) {
             (Some(t), Some(_)) => Some(FileNodes {
