@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value as Cbor;
@@ -400,22 +401,23 @@ pub fn ensure_verifier(repo: &mut Repo, name: &str) -> Result<EntityId> {
     Ok(id)
 }
 
-/// Set while a verifier runs. The daemon refuses requests meanwhile, so
-/// code under test cannot act through it, and callers know to retry.
-pub static VERIFYING: AtomicBool = AtomicBool::new(false);
-
-struct VerifyingGuard;
+/// Set on the repository while one of its verifiers runs. The daemon
+/// refuses requests for that repository meanwhile, so code under test
+/// cannot act through it, and callers know to retry. The flag is per
+/// repository, not per process: a daemon serving another repository in
+/// the same process, or a test beside a test, is not busy.
+struct VerifyingGuard(Arc<AtomicBool>);
 
 impl VerifyingGuard {
-    fn enter() -> VerifyingGuard {
-        VERIFYING.store(true, Ordering::SeqCst);
-        VerifyingGuard
+    fn enter(flag: &Arc<AtomicBool>) -> VerifyingGuard {
+        flag.store(true, Ordering::SeqCst);
+        VerifyingGuard(Arc::clone(flag))
     }
 }
 
 impl Drop for VerifyingGuard {
     fn drop(&mut self) {
-        VERIFYING.store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -521,7 +523,7 @@ pub fn run(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.env("TESSRA_SANDBOX", "1");
-    let _guard = VerifyingGuard::enter();
+    let _guard = VerifyingGuard::enter(&repo.verifying);
     let start = Instant::now();
     let mut child = cmd
         .spawn()

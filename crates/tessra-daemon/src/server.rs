@@ -62,6 +62,8 @@ impl Endpoint {
 
 struct Shared {
     repo: Mutex<Repo>,
+    /// The repository's verifying flag, readable without its lock.
+    verifying: Arc<AtomicBool>,
     sessions: Mutex<HashMap<String, Actor>>,
     last_activity: AtomicU64,
     stop: AtomicBool,
@@ -83,8 +85,10 @@ pub fn serve(repo: Repo, idle: Duration) -> std::io::Result<()> {
     std::fs::write(&staging, format!("{port}\n{token}\n{pid}\n"))?;
     std::fs::rename(&staging, &endpoint_path)?;
 
+    let verifying = Arc::clone(&repo.verifying);
     let shared = Arc::new(Shared {
         repo: Mutex::new(repo),
+        verifying,
         sessions: Mutex::new(HashMap::new()),
         last_activity: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -183,7 +187,7 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
     }
     // While a verifier runs, the repository is busy and nothing the code
     // under test does can reach it. Other callers retry.
-    if crate::verifiers::VERIFYING.load(std::sync::atomic::Ordering::SeqCst) {
+    if shared.verifying.load(Ordering::SeqCst) {
         return json!({
             "ok": false,
             "code": "BUSY",

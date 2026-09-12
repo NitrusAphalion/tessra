@@ -93,6 +93,9 @@ pub struct Repo {
     pub daemon: EntityId,
     daemon_key: SecretKey,
     pub workspaces: Vec<Workspace>,
+    /// Set while one of this repository's verifiers runs; the daemon
+    /// answers BUSY for this repository meanwhile.
+    pub verifying: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct InitOptions {
@@ -175,6 +178,7 @@ impl Repo {
             daemon: init.daemon,
             daemon_key,
             workspaces: Vec::new(),
+            verifying: Default::default(),
         };
         // The colocated checkout is a workspace owned by the daemon's principal.
         let ws = Workspace {
@@ -242,9 +246,13 @@ impl Repo {
             daemon,
             daemon_key,
             workspaces: Vec::new(),
+            verifying: Default::default(),
         };
         repo.workspaces = repo.load_workspaces()?;
         verifiers::ensure_index(repo.store())?;
+        // A repository from before owner credentials gets one now; the
+        // refusal that needs it says where it is.
+        repo.ensure_owner_credential()?;
         Ok(repo)
     }
 
