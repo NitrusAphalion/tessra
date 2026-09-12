@@ -394,6 +394,17 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
         if revision_of_commit(repo, commit)?.is_some() {
             continue;
         }
+        // The commit's snapshot is indexed against the trunk head it lands
+        // on, so its units keep the identity trunk knows them by.
+        let (head_id, _) = crate::verbs::trunk_head_of(repo)?;
+        let head_rev: Revision = repo.store().get(&head_id)?;
+        let (_, head_snap) = crate::verbs::root_snapshot_of(repo, &head_rev)?;
+        let (index_id, index) = crate::semantic::index_for_revision(repo.store(), &head_rev)?;
+        let parent = gitimport::Indexed {
+            flat: tree::flatten(repo.store(), &head_snap.root)?,
+            index_id,
+            index,
+        };
         repo.store().begin_batch();
         let content = gitimport::content_for_commit(
             repo.store(),
@@ -401,10 +412,10 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str) -> Result<Js
             commit,
             &mut blob_cache,
             &mut rules_id,
+            Some(&parent),
         );
         repo.store().end_batch()?;
-        let content = content?;
-        let (head_id, _) = crate::verbs::trunk_head_of(repo)?;
+        let (content, _) = content?;
         let rev = Revision {
             id: content.change.unwrap_or_else(EntityId::random),
             prev: None,
@@ -687,6 +698,57 @@ mod tests {
         // The reset checked the landed file out; git may have given it CRLF.
         let d = std::fs::read_to_string(dir.path().join("d.txt")).unwrap();
         assert_eq!(d.replace("\r\n", "\n"), "landed\n");
+    }
+
+    #[test]
+    fn an_imported_history_keeps_unit_identity_so_diff_shows_only_what_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            dir.path().join("notes.md"),
+            "# notes\n\nsome prose\n\nmore prose\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn a() { 1 }\nfn b() { 2 }\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("lib.rs"), "fn a() { 1 }\nfn b() { 22 }\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "two"]);
+        let mut repo = Repo::init(
+            dir.path(),
+            InitOptions {
+                name: "t".into(),
+                import_git: true,
+                history: 10,
+            },
+        )
+        .unwrap();
+        let mut owner = repo.daemon_actor();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner,
+            "query",
+            &json!({ "kind": "diff", "budget": 10_000 }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let units = out["result"]["units"].as_array().expect("units");
+        let shown: Vec<(String, String, String)> = units
+            .iter()
+            .map(|u| {
+                (
+                    u["path"].as_str().unwrap_or("").to_string(),
+                    u["name"].as_str().unwrap_or("").to_string(),
+                    u["change"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![("lib.rs".to_string(), "b".to_string(), "changed".to_string())],
+            "{out}"
+        );
+        assert_eq!(out["result"]["truncated"], json!(false), "{out}");
     }
 
     #[test]

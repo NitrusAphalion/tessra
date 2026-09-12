@@ -8,13 +8,23 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use tessra_core::object::{EntryKind, Intent, Rule, Snapshot, TrackingRules};
+use tessra_core::object::{EntryKind, Intent, NodeIndex, Rule, Snapshot, TrackingRules};
 use tessra_core::store::ObjectStore;
 use tessra_core::{EntityId, ObjectId};
 use tessra_oplog::build::InitContent;
+use tessra_store::RedbStore;
 
 use crate::tree::{self, Flat, Leaf};
 use crate::{now, Error, Result};
+
+/// A snapshot's tree and semantic index, carried from one imported commit
+/// to the next so that units keep their identity along the history and a
+/// diff between two imported revisions shows only what the commit changed.
+pub struct Indexed {
+    pub flat: Flat,
+    pub index_id: ObjectId,
+    pub index: NodeIndex,
+}
 
 fn git(root: &Path, args: &[&str]) -> Result<Option<String>> {
     let out = crate::quiet(Command::new("git"))
@@ -147,17 +157,13 @@ fn tracking_rules(root: &Path, vendored: &[String]) -> TrackingRules {
 }
 
 /// Import HEAD only.
-pub fn import_head<S: ObjectStore>(store: &S, root: &Path) -> Result<Option<InitContent>> {
+pub fn import_head(store: &RedbStore, root: &Path) -> Result<Option<InitContent>> {
     Ok(import_history(store, root, 1)?.pop())
 }
 
-/// Import the last `max` first-parent commits, oldest first. Empty when
-/// the repository has no commits.
-pub fn import_history<S: ObjectStore>(
-    store: &S,
-    root: &Path,
-    max: usize,
-) -> Result<Vec<InitContent>> {
+/// Import the last `max` first-parent commits, oldest first, each indexed
+/// against the one before. Empty when the repository has no commits.
+pub fn import_history(store: &RedbStore, root: &Path, max: usize) -> Result<Vec<InitContent>> {
     let n = max.max(1).to_string();
     let Some(list) = git(
         root,
@@ -177,27 +183,33 @@ pub fn import_history<S: ObjectStore>(
     let mut blob_cache: HashMap<String, (ObjectId, bool)> = HashMap::new();
     let mut rules_id: Option<ObjectId> = None;
     let mut out = Vec::with_capacity(commits.len());
+    let mut previous: Option<Indexed> = None;
     for commit in &commits {
-        out.push(content_for_commit(
+        let (content, indexed) = content_for_commit(
             store,
             root,
             commit,
             &mut blob_cache,
             &mut rules_id,
-        )?);
+            previous.as_ref(),
+        )?;
+        out.push(content);
+        previous = Some(indexed);
     }
     Ok(out)
 }
 
-/// One commit's tree, rules, title, body, intent, and legacy change ID.
+/// One commit's tree, rules, title, body, intent, and legacy change ID,
+/// with its snapshot indexed against `parent`, the revision it follows.
 /// `blob_cache` maps git blob ids to stored objects across calls.
-pub fn content_for_commit<S: ObjectStore>(
-    store: &S,
+pub fn content_for_commit(
+    store: &RedbStore,
     root: &Path,
     commit: &str,
     blob_cache: &mut HashMap<String, (ObjectId, bool)>,
     rules_id: &mut Option<ObjectId>,
-) -> Result<InitContent> {
+    parent: Option<&Indexed>,
+) -> Result<(InitContent, Indexed)> {
     let entries = ls_tree(root, commit)?;
     let missing: Vec<String> = entries
         .iter()
@@ -263,11 +275,19 @@ pub fn content_for_commit<S: ObjectStore>(
         }
     };
     let tree_id = tree::build(store, &flat)?;
+    let nodes = crate::semantic::build_nodes(store, &flat, parent.map(|p| (&p.flat, &p.index)))?;
+    let index_id = crate::semantic::put_index(
+        store,
+        tree_id,
+        parent.iter().map(|p| p.index_id).collect(),
+        nodes,
+    )?;
+    let index: NodeIndex = store.get(&index_id)?;
     let snapshot = store.put(&Snapshot {
         root: tree_id,
         rules,
         env: None,
-        index: None,
+        index: Some(index_id),
     })?;
 
     let meta = git(
@@ -305,18 +325,25 @@ pub fn content_for_commit<S: ObjectStore>(
         time: ctime,
         legacy: Some(true),
     };
-    Ok(InitContent {
-        snapshot,
-        title: if title.is_empty() {
-            "import".into()
-        } else {
-            title
+    Ok((
+        InitContent {
+            snapshot,
+            title: if title.is_empty() {
+                "import".into()
+            } else {
+                title
+            },
+            body: Some(body),
+            intent: Some(intent),
+            change: Some(EntityId::derive("legacy-cid", commit.as_bytes())),
+            time: Some(ctime),
         },
-        body: Some(body),
-        intent: Some(intent),
-        change: Some(EntityId::derive("legacy-cid", commit.as_bytes())),
-        time: Some(ctime),
-    })
+        Indexed {
+            flat,
+            index_id,
+            index,
+        },
+    ))
 }
 
 #[allow(dead_code)]

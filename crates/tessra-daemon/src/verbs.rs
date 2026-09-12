@@ -1083,12 +1083,11 @@ fn query(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 None => current_revision(repo, &ws)?,
             };
             let (snap_id, _) = root_snapshot(repo, &rev)?;
-            let (_, idx) = crate::semantic::index_for_snapshot(repo.store(), &snap_id)?;
+            let (_, idx) = crate::semantic::index_for_revision(repo.store(), &rev)?;
             let parent_idx = match rev.parents.first() {
                 Some(p) => {
                     let pr: Revision = repo.store().get(p)?;
-                    let (ps, _) = root_snapshot(repo, &pr)?;
-                    crate::semantic::index_for_snapshot(repo.store(), &ps)?.1
+                    crate::semantic::index_for_revision(repo.store(), &pr)?.1
                 }
                 None => tessra_core::object::NodeIndex {
                     root: snap_id,
@@ -1824,7 +1823,7 @@ fn edit_rename(
 fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let ws = require_workspace(repo, actor)?;
     let (cur_id, cur) = current_revision(repo, &ws)?;
-    let (cur_snap_id, cur_snap) = root_snapshot(repo, &cur)?;
+    let (_, cur_snap) = root_snapshot(repo, &cur)?;
     let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
     let base_flat: Flat = tree::flatten(repo.store(), &cur_snap.root)?;
     let mut out = fs::snapshot_dir(
@@ -1870,8 +1869,7 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         );
     }
     // The semantic index, matched against the parent's so units keep their identity.
-    let (parent_idx_id, parent_idx) =
-        crate::semantic::index_for_snapshot(repo.store(), &cur_snap_id)?;
+    let (parent_idx_id, parent_idx) = crate::semantic::index_for_revision(repo.store(), &cur)?;
     let nodes =
         crate::semantic::build_nodes(repo.store(), &out.flat, Some((&base_flat, &parent_idx)))?;
     let node_count = nodes.len();
@@ -3681,8 +3679,8 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         ));
     }
     let (cur_id, cur) = current_revision(repo, &ws)?;
-    let (cur_snap_id, cur_snap) = root_snapshot(repo, &cur)?;
-    let (cur_idx_id, cur_idx) = crate::semantic::index_for_snapshot(repo.store(), &cur_snap_id)?;
+    let (_, cur_snap) = root_snapshot(repo, &cur)?;
+    let (cur_idx_id, cur_idx) = crate::semantic::index_for_revision(repo.store(), &cur)?;
     let base_flat = tree::flatten(repo.store(), &cur_snap.root)?;
     let trunk_flat = if ws.base == cur_id {
         base_flat.clone()

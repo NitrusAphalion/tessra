@@ -104,8 +104,15 @@ fn assign_only(path: &str, raw: &[RawNode], previous: &[Node]) -> Vec<Node> {
 
     let mut assigned: Vec<Option<EntityId>> = vec![None; raw.len()];
     let mut ordinals: HashMap<(Option<usize>, String, String), usize> = HashMap::new();
-    // Pass 1: exact key.
+    // Pass 1: exact key, for named units. A nameless unit, such as a chunk
+    // of a file without a grammar, has only its position for a key, so it
+    // is matched by body first (pass 2) and then by position between the
+    // units matched around it (pass 2b): an inserted paragraph does not
+    // shift the identity of every paragraph after it.
     for (i, r) in raw.iter().enumerate() {
+        if r.name.is_empty() {
+            continue;
+        }
         let parent_nid = r.parent.and_then(|p| assigned[p]);
         let ord_key = (r.parent, r.kind.clone(), r.name.clone());
         let ord = *ordinals.entry(ord_key).and_modify(|c| *c += 1).or_insert(0);
@@ -139,6 +146,45 @@ fn assign_only(path: &str, raw: &[RawNode], previous: &[Node]) -> Vec<Node> {
                     assigned[i] = Some(nid);
                     break;
                 }
+            }
+        }
+    }
+    // Pass 2b: nameless units still unmatched take, in order, the unmatched
+    // nameless units that sit between the same matched neighbours in the
+    // previous version, so an edited paragraph keeps its identity.
+    let old_pos: HashMap<EntityId, usize> = previous
+        .iter()
+        .enumerate()
+        .map(|(p, n)| (n.nid, p))
+        .collect();
+    let anchor = |i: usize| assigned[i].and_then(|nid| old_pos.get(&nid).copied());
+    let mut before: Vec<Option<usize>> = vec![None; raw.len()];
+    let mut last = None;
+    for i in 0..raw.len() {
+        before[i] = last;
+        last = anchor(i).or(last);
+    }
+    let mut after: Vec<Option<usize>> = vec![None; raw.len()];
+    let mut next = None;
+    for i in (0..raw.len()).rev() {
+        after[i] = next;
+        next = anchor(i).or(next);
+    }
+    let mut cursor = 0;
+    for (i, r) in raw.iter().enumerate() {
+        if assigned[i].is_some() || !r.name.is_empty() {
+            continue;
+        }
+        let parent_nid = r.parent.and_then(|p| assigned[p]);
+        let lo = before[i].map(|p| p + 1).unwrap_or(0).max(cursor);
+        let hi = after[i].unwrap_or(previous.len());
+        for p in lo..hi {
+            let n = &previous[p];
+            if n.name.is_empty() && n.kind == r.kind && n.parent == parent_nid && used.insert(n.nid)
+            {
+                assigned[i] = Some(n.nid);
+                cursor = p + 1;
+                break;
             }
         }
     }
@@ -204,6 +250,26 @@ mod tests {
         let d = by_name("d", &n3);
         assert!(!ids.contains(&d));
         assert_eq!(by_name("c", &n3), ids[2]);
+    }
+
+    #[test]
+    fn chunks_keep_their_ids_around_an_inserted_and_an_edited_paragraph() {
+        let v1 = crate::extract::chunks(b"one\n\ntwo\n\nthree\n\nfour\n");
+        let n1 = assign_ids("notes.md", &v1, &[]);
+        let ids: Vec<EntityId> = n1.iter().map(|n| n.nid).collect();
+        // A new first paragraph, the second edited, the rest untouched.
+        let v2 = crate::extract::chunks(b"zero\n\none\n\ntwo, edited\n\nthree\n\nfour\n");
+        let n2 = assign_ids("notes.md", &v2, &n1);
+        assert!(!ids.contains(&n2[0].nid), "the new paragraph is fresh");
+        assert_eq!(n2[1].nid, ids[0], "an unchanged paragraph keeps its id");
+        assert_eq!(n2[2].nid, ids[1], "the edited paragraph keeps its id");
+        assert_eq!(n2[3].nid, ids[2]);
+        assert_eq!(n2[4].nid, ids[3]);
+        // The same file again matches every chunk.
+        let n3 = assign_ids("notes.md", &v2, &n2);
+        let same: Vec<EntityId> = n3.iter().map(|n| n.nid).collect();
+        let prev: Vec<EntityId> = n2.iter().map(|n| n.nid).collect();
+        assert_eq!(same, prev);
     }
 
     #[test]

@@ -342,26 +342,95 @@ pub fn covering_tests(idx: &NodeIndex) -> HashMap<EntityId, Vec<&Node>> {
 }
 
 /// The index for a snapshot: the one it references, or one computed on
-/// demand without a parent and cached against the snapshot ID.
+/// demand without a parent and cached against the snapshot ID. Callers
+/// that hold the revision use `index_for_revision`, which computes a
+/// missing index against the parent's so identities survive.
 pub fn index_for_snapshot(store: &RedbStore, snap_id: &ObjectId) -> Result<(ObjectId, NodeIndex)> {
+    if let Some(found) = cached_index(store, snap_id)? {
+        return Ok(found);
+    }
+    build_index(store, snap_id, None)
+}
+
+/// The index for a revision's root snapshot. A snapshot that carries none,
+/// as those of a history imported before indexes were built at import do,
+/// gets one computed against its parent revision's index, oldest first
+/// along the chain, so units keep their identity and a diff between two
+/// such revisions shows only what changed between them.
+pub fn index_for_revision(store: &RedbStore, rev: &Revision) -> Result<(ObjectId, NodeIndex)> {
+    let snap_of = |r: &Revision| r.snapshots.get("").copied();
+    let Some(snap_id) = snap_of(rev) else {
+        return Err(Error::verb("ROOT", "revision has no root snapshot"));
+    };
+    // The ancestors still without an index, nearest first, each with the
+    // snapshot of its first parent.
+    let mut todo: Vec<(ObjectId, Option<ObjectId>)> = Vec::new();
+    let mut cur_snap = snap_id;
+    let mut cur_parents = rev.parents.clone();
+    while cached_index(store, &cur_snap)?.is_none() {
+        let parent_snap = match cur_parents.first() {
+            Some(p) => {
+                let pr: Revision = store.get(p)?;
+                cur_parents = pr.parents.clone();
+                snap_of(&pr)
+            }
+            None => None,
+        };
+        todo.push((cur_snap, parent_snap));
+        match parent_snap {
+            Some(ps) if todo.len() < 100_000 => cur_snap = ps,
+            _ => break,
+        }
+    }
+    for (snap, parent) in todo.into_iter().rev() {
+        build_index(store, &snap, parent.as_ref())?;
+    }
+    index_for_snapshot(store, &snap_id)
+}
+
+/// The index a snapshot references, or the one cached for it.
+fn cached_index(store: &RedbStore, snap_id: &ObjectId) -> Result<Option<(ObjectId, NodeIndex)>> {
     let snap: Snapshot = store.get(snap_id)?;
     if let Some(id) = snap.index {
-        return Ok((id, store.get(&id)?));
+        return Ok(Some((id, store.get(&id)?)));
     }
-    let key = format!("idx:{}", snap_id.to_hex());
-    if let Some(bytes) = store.meta(&key)? {
+    if let Some(bytes) = store.meta(&format!("idx:{}", snap_id.to_hex()))? {
         if let Ok(id) = ObjectId::from_slice(&bytes) {
             if let Ok(idx) = store.get::<NodeIndex>(&id) {
-                return Ok((id, idx));
+                return Ok(Some((id, idx)));
             }
         }
     }
+    Ok(None)
+}
+
+/// Compute a snapshot's index, against the index of `parent_snap` when
+/// given, and cache it against the snapshot ID.
+fn build_index(
+    store: &RedbStore,
+    snap_id: &ObjectId,
+    parent_snap: Option<&ObjectId>,
+) -> Result<(ObjectId, NodeIndex)> {
+    let snap: Snapshot = store.get(snap_id)?;
     let flat = tree::flatten(store, &snap.root)?;
+    let parent = match parent_snap {
+        Some(p) => {
+            let (pid, pidx) = index_for_snapshot(store, p)?;
+            let psnap: Snapshot = store.get(p)?;
+            Some((tree::flatten(store, &psnap.root)?, pid, pidx))
+        }
+        None => None,
+    };
     store.begin_batch();
-    let nodes = build_nodes(store, &flat, None)?;
-    let id = put_index(store, snap.root, Vec::new(), nodes)?;
+    let nodes = build_nodes(store, &flat, parent.as_ref().map(|(f, _, i)| (f, i)))?;
+    let id = put_index(
+        store,
+        snap.root,
+        parent.iter().map(|(_, pid, _)| *pid).collect(),
+        nodes,
+    )?;
     store.end_batch()?;
-    store.set_meta(&key, &id.0)?;
+    store.set_meta(&format!("idx:{}", snap_id.to_hex()), &id.0)?;
     Ok((id, store.get(&id)?))
 }
 
@@ -559,10 +628,10 @@ pub fn blame(repo: &Repo, rev_id: ObjectId, path: &str) -> Result<Vec<BlameEntry
     ) -> Result<&'a Vec<Node>> {
         #[allow(clippy::map_entry)]
         if !cache.contains_key(&id) {
-            let snap = rev_of(store, revs, id)?.snapshots.get("").copied();
-            let nodes = match snap {
-                Some(s) => {
-                    let (_, idx) = index_for_snapshot(store, &s)?;
+            let rev = rev_of(store, revs, id)?.clone();
+            let nodes = match rev.snapshots.get("") {
+                Some(_) => {
+                    let (_, idx) = index_for_revision(store, &rev)?;
                     let map: HashMap<EntityId, EntityId> = idx
                         .aliases
                         .as_ref()
@@ -679,6 +748,67 @@ mod tests {
     fn nodes(path: &str, src: &str, prev: &[Node]) -> Vec<Node> {
         let raw = extract(path, src.as_bytes()).unwrap();
         assign_ids(path, &raw, prev)
+    }
+
+    #[test]
+    fn a_revision_whose_snapshot_has_no_index_is_indexed_against_its_parent() {
+        // Two revisions as a history import wrote them before indexes were
+        // built at import: snapshots without an index, chained by parent.
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(&dir.path().join("o.redb")).unwrap();
+        let mut revs = Vec::new();
+        let mut parent: Option<ObjectId> = None;
+        for lib in [
+            "fn a() { 1 }\nfn b() { 2 }\n",
+            "fn a() { 1 }\nfn b() { 22 }\n",
+        ] {
+            let mut flat = Flat::new();
+            flat.insert(
+                "notes.md".into(),
+                Leaf::file(store.put_blob(b"# notes\n\nprose\n").unwrap(), false),
+            );
+            flat.insert(
+                "lib.rs".into(),
+                Leaf::file(store.put_blob(lib.as_bytes()).unwrap(), false),
+            );
+            let root = tree::build(&store, &flat).unwrap();
+            let rules = store
+                .put(&tessra_core::object::TrackingRules::default())
+                .unwrap();
+            let snap = store
+                .put(&Snapshot {
+                    root,
+                    rules,
+                    env: None,
+                    index: None,
+                })
+                .unwrap();
+            let rev = Revision {
+                id: EntityId::random(),
+                prev: None,
+                snapshots: BTreeMap::from([("".to_string(), snap)]),
+                parents: parent.into_iter().collect(),
+                intent: None,
+                title: "import".into(),
+                body: None,
+                author: EntityId::random(),
+                time: 0,
+                ops: None,
+                flags: None,
+            };
+            parent = Some(store.put(&rev).unwrap());
+            revs.push(rev);
+        }
+        let (_, head_idx) = index_for_revision(&store, &revs[1]).unwrap();
+        let (_, base_idx) = index_for_revision(&store, &revs[0]).unwrap();
+        let changes: Vec<(String, String, &str)> = diff_indexes(&base_idx, &head_idx)
+            .into_iter()
+            .map(|c| (c.path, c.name, c.change))
+            .collect();
+        assert_eq!(
+            changes,
+            vec![("lib.rs".to_string(), "b".to_string(), "changed")]
+        );
     }
 
     #[test]
