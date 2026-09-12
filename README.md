@@ -36,7 +36,7 @@ Built for agents that write code around the clock, and for the humans who decide
 
 <p align="center">
 <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
-<img alt="Rust 1.80+" src="https://img.shields.io/badge/rust-1.80%2B-orange">
+<img alt="Rust 1.90+" src="https://img.shields.io/badge/rust-1.90%2B-orange">
 <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-yellow">
 <img alt="Interface: CLI and MCP" src="https://img.shields.io/badge/interface-CLI%20%2B%20MCP-brightgreen">
 </p>
@@ -523,7 +523,7 @@ The specification lives in [spec/](spec/README.md): conventions, the object cata
 
 ## Developing
 
-You need Rust 1.80+ (stable) and git. On Windows, add Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need.
+You need Rust 1.90+ (stable) and git. On Windows, add Visual Studio Build Tools with the C++ workload, which the tree-sitter grammars need.
 
 ```sh
 git clone https://github.com/NitrusAphalion/tessra

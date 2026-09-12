@@ -4,7 +4,7 @@ Found a bug while running Tessra? File a [GitHub issue](https://github.com/Nitru
 
 ## Toolchain
 
-Rust stable, pinned by `rust-toolchain.toml`. On Windows use the MSVC target: install Visual Studio Build Tools with the C++ workload, then
+Rust stable, pinned by `rust-toolchain.toml`; the oldest release the workspace builds with is 1.90, the `rust-version` in `Cargo.toml`, which CI checks. On Windows use the MSVC target: install Visual Studio Build Tools with the C++ workload, then
 
 ```
 rustup set default-host x86_64-pc-windows-msvc
