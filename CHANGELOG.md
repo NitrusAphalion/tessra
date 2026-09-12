@@ -4,7 +4,15 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+### Added
+
+- A CI workflow runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test --workspace` on every pull request and push to `main`, on Ubuntu, macOS, and Windows, and checks the workspace builds with the declared minimum Rust.
+- `TESSRA_DATA_DIR` overrides where the store, keys, and workspaces live, and `InitOptions::data_dir` does the same for one repository. The test suite uses it so a run leaves nothing under the local application data directory.
+- An end-to-end test of the MCP server through the built binary: `initialize`, `tools/list`, and a `tessra_status` call.
+
 ### Changed
+
+- The declared minimum Rust is 1.90, which the locked dependencies (tree-sitter 0.27) need; the README said 1.80, which could not build the workspace.
 
 - Reaching the daemon no longer makes a process the owner or a human. `init` issues an owner credential, printed once and kept in the keys directory as `owner.credential` until you move it (the daemon stores only its hash), and the owner's policy verbs (`standard`, `hook`, `channel`, `target`, `grant`, `revoke`, `config --set`, `attest`, `revert`, `undo`) ask for it through `--credential`, `TESSRA_CREDENTIAL`, or a prompt at a terminal. `grant --human` and `grant --external` print a credential for the principal, and `--as <name>` needs it. A repository from an earlier release gets an owner credential on its next open; a human or external granted earlier is reissued one by being granted again. An agent session that can run `tessra` in the checkout can therefore no longer loosen the standard, attest as the owner, or approve its own work.
 
