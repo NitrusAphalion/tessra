@@ -158,16 +158,16 @@ fn assign_only(path: &str, raw: &[RawNode], previous: &[Node]) -> Vec<Node> {
         .map(|(p, n)| (n.nid, p))
         .collect();
     let anchor = |i: usize| assigned[i].and_then(|nid| old_pos.get(&nid).copied());
-    let mut before: Vec<Option<usize>> = vec![None; raw.len()];
+    let mut before: Vec<Option<usize>> = Vec::with_capacity(raw.len());
     let mut last = None;
     for i in 0..raw.len() {
-        before[i] = last;
+        before.push(last);
         last = anchor(i).or(last);
     }
     let mut after: Vec<Option<usize>> = vec![None; raw.len()];
     let mut next = None;
-    for i in (0..raw.len()).rev() {
-        after[i] = next;
+    for (i, slot) in after.iter_mut().enumerate().rev() {
+        *slot = next;
         next = anchor(i).or(next);
     }
     let mut cursor = 0;
@@ -178,8 +178,7 @@ fn assign_only(path: &str, raw: &[RawNode], previous: &[Node]) -> Vec<Node> {
         let parent_nid = r.parent.and_then(|p| assigned[p]);
         let lo = before[i].map(|p| p + 1).unwrap_or(0).max(cursor);
         let hi = after[i].unwrap_or(previous.len());
-        for p in lo..hi {
-            let n = &previous[p];
+        for (p, n) in previous.iter().enumerate().take(hi).skip(lo) {
             if n.name.is_empty() && n.kind == r.kind && n.parent == parent_nid && used.insert(n.nid)
             {
                 assigned[i] = Some(n.nid);
