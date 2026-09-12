@@ -211,8 +211,17 @@ pub fn evaluate<S: ObjectStore>(
         }),
     };
     let mut subjects: Vec<Vec<u8>> = vec![revision_id.as_bytes().to_vec()];
+    // A revision inherits the attestations on the revision it supersedes
+    // only when the system derived it from that revision by merging it onto
+    // a new base: a landing, a restack, or a conflict merge, whose second
+    // parent names the revision merged. An author's re-snapshot names its
+    // predecessor as prev too, but its content is the author's again, so an
+    // approval, a judge's verdict, or a CI result on the predecessor does
+    // not carry to it.
     if let Some(p) = revision.prev {
-        subjects.push(p.as_bytes().to_vec());
+        if revision.parents.get(1) == Some(&p) {
+            subjects.push(p.as_bytes().to_vec());
+        }
     }
     subjects.extend(snap_ids.iter().map(|s| s.as_bytes().to_vec()));
     let ctx = Ctx {

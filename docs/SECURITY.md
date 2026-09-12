@@ -43,7 +43,7 @@ Least privilege is the default. A task-scoped agent gets: write to its own works
 
 ## Human approvals
 
-An approval is an attestation signed with the human's key. The daemon sends a challenge through a channel. The human's client signs it with a passkey or hardware key, which is a system prompt on their device, not a Tessra screen. Channels that cannot carry a signature, such as plain email, produce channel-attested approvals with lower trust, and a standard can require key-signed approval for sensitive scopes. An agent cannot produce either kind. It holds no human key and no channel credential.
+An approval is an attestation signed with the human's key. The daemon sends a challenge through a channel. The human's client signs it with a passkey or hardware key, which is a system prompt on their device, not a Tessra screen. Channels that cannot carry a signature, such as plain email, produce channel-attested approvals with lower trust, and a standard can require key-signed approval for sensitive scopes. An agent cannot produce either kind. It holds no human key and no channel credential. Until passkeys exist, a human's daemon-held key is usable only with a credential the grant issued to them, the owner's policy verbs take an owner credential issued at init, and the daemon token alone makes a process neither; an approval binds to the revision the human saw and carries only to what the system derives from it.
 
 ## Verifier isolation
 

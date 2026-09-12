@@ -189,6 +189,7 @@ impl Repo {
         };
         repo.save_workspace(&ws)?;
         repo.workspaces.push(ws);
+        repo.ensure_owner_credential()?;
         Ok(repo)
     }
 

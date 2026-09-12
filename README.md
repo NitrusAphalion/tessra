@@ -252,6 +252,8 @@ tessra standard                                                           # show
 
 `--when` applies to every clause added in the same command, so keep risk-gated clauses in an invocation of their own. A clause is `kind(name, key=value)`; `all(...)`, `any(...)`, and `not(...)` nest, and `unless` adds an escape hatch.
 
+Editing the standard is an owner action, and owner actions that set policy (`standard`, `hook`, `channel`, `target`, `grant`, `revoke`, `config --set`, `attest`, `revert`, `undo`) ask for the owner credential that `init` printed: pass `--credential`, set `TESSRA_CREDENTIAL` in the terminal you use, or answer the prompt. Reaching the daemon is not being the owner, so an agent session that can run `tessra` in the checkout cannot loosen the standard or approve its own work. The credential stays in the keys directory as `owner.credential` until you move it somewhere agents cannot read; the daemon keeps only its hash.
+
 | Clause | Satisfied by |
 |---|---|
 | `attest(<kind>)` | An attestation of that kind signed by the daemon's verifier runner or by a principal you granted. `tests.pass` comes from `verify`; `for=new_tests` limits `tests.fail_on_parent` to tests the change added. |
@@ -285,18 +287,18 @@ tessra hook --name notify-ci --on proposed --do 'webhook(https://ci.example.com/
 tessra standard --require 'attest(ci.pass)'
 ```
 
-The hook posts the event as JSON with a daemon signature in the `X-Tessra-Signature` header. When the run finishes, CI calls back:
+The hook posts the event as JSON with a daemon signature in the `X-Tessra-Signature` header. The grant prints a credential for `ci` once; put it in the CI system's secrets. When the run finishes, CI calls back with it:
 
 ```sh
-tessra --as ci attest --kind ci.pass --subject <snapshot> --result true
+tessra --as ci --credential "$TESSRA_CI_CREDENTIAL" attest --kind ci.pass --subject <snapshot> --result true
 ```
 
 ### Putting a human in the loop
 
-A person is a principal whose key the daemon holds, reachable through a channel. When a landing needs an approval the standard requires, the daemon opens one request per revision, delivers it to every channel, and the reply is a key-signed attestation the agent never touches.
+A person is a principal whose key the daemon holds, reachable through a channel. When a landing needs an approval the standard requires, the daemon opens one request per revision, delivers it to every channel, and the reply is a key-signed attestation the agent never touches and cannot forge.
 
 ```sh
-tessra grant --human maria                                                           # a principal that may only approve
+tessra grant --human maria                                                           # a principal that may only approve; prints her credential once
 tessra channel --name oncall --kind inbox --path ~/tessra-inbox --principals maria   # or --kind webhook --url https://…
 tessra standard --when high --require 'approved(human, keysigned=true)'              # what needs her
 ```
@@ -304,10 +306,10 @@ tessra standard --when high --require 'approved(human, keysigned=true)'         
 A refused landing names the request and the reply command. `tessra query --kind exceptions` lists everything waiting on a person, and an inbox channel writes each request as a JSON file with the change, the unmet clauses, the risk factors, and any judges' reasoning. Maria answers with
 
 ```sh
-tessra --as maria approve --request <id> --note "looks good"     # or --no
+tessra --as maria approve --request <id> --note "looks good"     # or --no; asks for her credential at the prompt
 ```
 
-and the next `promote` lands. A split verdict among judges opens an exception the same way.
+and the next `promote` lands. Acting as Maria takes the credential her grant printed, so the daemon token that every process in the checkout can read is not enough to answer as her; granting her again reissues it. A split verdict among judges opens an exception the same way. An approval is for the revision she saw: if the agent edits the change again before it lands, the new revision needs its own.
 
 ### Writing a hook
 
@@ -440,7 +442,7 @@ How much git history a checkout contributes is a flag, not a key: `tessra init -
 
 ## Troubleshooting and FAQ
 
-**Every command talks to a daemon.** The first command in a repository starts one detached, listening on loopback; `.tessra/daemon` holds its port, a bearer token, and its pid, and it exits after thirty idle minutes. `tessra daemon --idle-minutes 30` runs one in the foreground, and `--no-daemon` on any command runs in-process instead, which is the first thing to try when something looks stuck. While a verifier runs, the daemon answers every request with `BUSY`, so code under test cannot act through it.
+**Every command talks to a daemon.** The first command in a repository starts one detached, listening on loopback; `.tessra/daemon` holds its port, a bearer token, and its pid, and it exits after thirty idle minutes. The token lets a process reach the daemon; it makes nobody the owner or a human, which take the credentials `init` and `grant` printed. `tessra daemon --idle-minutes 30` runs one in the foreground, and `--no-daemon` on any command runs in-process instead, which is the first thing to try when something looks stuck. While a verifier runs, the daemon answers every request with `BUSY`, so code under test cannot act through it.
 
 **A refusal is data.** Every error carries a `code` and, where it applies, the `unmet` clauses and a `fix` you can run. `STANDARD_UNMET` names the clause and what would satisfy it, `BUSY` means a verifier is running, `SCOPE` means the session's capability does not cover that path or verb, and `GIT` means the bridge could not run `git`.
 

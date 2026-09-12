@@ -4,7 +4,14 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- Reaching the daemon no longer makes a process the owner or a human. `init` issues an owner credential, printed once and kept in the keys directory as `owner.credential` until you move it (the daemon stores only its hash), and the owner's policy verbs (`standard`, `hook`, `channel`, `target`, `grant`, `revoke`, `config --set`, `attest`, `revert`, `undo`) ask for it through `--credential`, `TESSRA_CREDENTIAL`, or a prompt at a terminal. `grant --human` and `grant --external` print a credential for the principal, and `--as <name>` needs it. A repository from an earlier release gets an owner credential on its next open; a human or external granted earlier is reissued one by being granted again. An agent session that can run `tessra` in the checkout can therefore no longer loosen the standard, attest as the owner, or approve its own work.
+
+### Fixed
+
+- An approval, a judge's verdict, or an external attestation on a revision no longer counts for a later revision of the same change that the author re-snapshotted with different content. It carries only to the revisions the system derives from the attested one: its landing, its restack, and a conflict merge, whose second parent names it.
+- A restacked revision keeps the change's author instead of naming the daemon, so blame and provenance after a restack still point at who wrote the change.
 
 ## 0.1.3 - 2026-09-11
 

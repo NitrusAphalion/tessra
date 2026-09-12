@@ -32,6 +32,10 @@ pub struct Request {
     /// An external principal the daemon holds a key for, instead of an agent session.
     #[serde(default)]
     pub principal: Option<String>,
+    /// The credential that goes with acting as the owner or as `principal`.
+    /// The daemon token alone reaches the daemon; it makes nobody the owner.
+    #[serde(default)]
+    pub credential: Option<String>,
     pub verb: String,
     #[serde(default)]
     pub args: Value,
@@ -188,11 +192,15 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
     }
     let mut repo = shared.repo.lock().unwrap();
     let mut actor = match (&req.principal, &req.agent) {
-        (Some(name), _) => match repo.open_external(name) {
+        (Some(name), _) => match repo.open_external(name, req.credential.as_deref()) {
             Ok(a) => a,
             Err(e) => return json!({ "ok": false, "code": e.code(), "message": e.to_string() }),
         },
-        (None, None) => repo.daemon_actor(),
+        (None, None) => {
+            let mut a = repo.daemon_actor();
+            a.credentialed = repo.owner_credential_ok(req.credential.as_deref());
+            a
+        }
         (None, Some(name)) => {
             let write = if req.write.is_empty() {
                 vec!["**".to_string()]
@@ -211,6 +219,7 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
                     write_paths: a.write_paths.clone(),
                     workspace: a.workspace,
                     kind: a.kind.clone(),
+                    credentialed: false,
                 },
                 None => match repo.open_session(name, req.model.as_deref(), write) {
                     Ok(a) => {
@@ -227,6 +236,7 @@ fn dispatch(shared: &Shared, req: &Request) -> Value {
                                 write_paths: a.write_paths.clone(),
                                 workspace: a.workspace,
                                 kind: a.kind.clone(),
+                                credentialed: false,
                             },
                         );
                         a
@@ -310,6 +320,7 @@ mod tests {
             write: vec![],
             workspace: None,
             principal: None,
+            credential: None,
             verb: "remember".into(),
             args: json!({ "kind": "gotcha", "body": "served over tcp", "scope": { "kind": "path", "ref": "src" } }),
         };
@@ -322,6 +333,7 @@ mod tests {
             write: vec![],
             workspace: None,
             principal: None,
+            credential: None,
             verb: "query".into(),
             args: json!({ "kind": "memory" }),
         };
@@ -344,5 +356,110 @@ mod tests {
         assert_eq!(out["ok"], Value::Bool(true));
         handle.join().unwrap().unwrap();
         assert!(!tessra_dir.join("daemon").exists());
+    }
+
+    #[test]
+    fn the_daemon_token_makes_nobody_the_owner_or_a_human() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repo = Repo::init(
+            dir.path(),
+            InitOptions {
+                name: "t".into(),
+                import_git: false,
+                history: 1,
+            },
+        )
+        .unwrap();
+        let owner_secret = std::fs::read_to_string(repo.owner_credential_path())
+            .unwrap()
+            .trim()
+            .to_string();
+        let (_, _, maria_secret) = repo.grant_human("maria").unwrap();
+        let tessra_dir = repo.tessra_dir.clone();
+        let handle = std::thread::spawn(move || serve(repo, Duration::from_secs(60)));
+        let mut endpoint = None;
+        for _ in 0..100 {
+            if let Some(e) = Endpoint::read(&tessra_dir) {
+                endpoint = Some(e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let endpoint = endpoint.expect("daemon endpoint");
+        let base = Request {
+            token: endpoint.token.clone(),
+            agent: None,
+            model: None,
+            write: vec![],
+            workspace: None,
+            principal: None,
+            credential: None,
+            verb: "standard".into(),
+            args: json!({ "require": ["attest(tests.pass)"] }),
+        };
+        // The token alone reaches the daemon and reads, and sets no policy.
+        let out = client::call(&endpoint, &base).unwrap();
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+        let out = client::call(
+            &endpoint,
+            &Request {
+                args: json!({}),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        let out = client::call(
+            &endpoint,
+            &Request {
+                credential: Some("guess".into()),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+        let out = client::call(
+            &endpoint,
+            &Request {
+                credential: Some(owner_secret.clone()),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        // Nor does it make anyone a human.
+        let as_maria = Request {
+            principal: Some("maria".into()),
+            verb: "status".into(),
+            args: json!({}),
+            ..base.clone()
+        };
+        let out = client::call(&endpoint, &as_maria).unwrap();
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+        let out = client::call(
+            &endpoint,
+            &Request {
+                credential: Some(owner_secret.clone()),
+                ..as_maria.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["code"], json!("CREDENTIAL_BAD"), "{out}");
+        let out = client::call(
+            &endpoint,
+            &Request {
+                credential: Some(maria_secret.clone()),
+                ..as_maria.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["ok"], Value::Bool(true), "{out}");
+        assert_eq!(out["state"]["kind"], json!("human"), "{out}");
+        let stop = Request {
+            verb: "shutdown".into(),
+            ..base
+        };
+        client::call(&endpoint, &stop).unwrap();
+        handle.join().unwrap().unwrap();
     }
 }

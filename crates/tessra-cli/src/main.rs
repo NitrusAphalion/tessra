@@ -2,13 +2,17 @@
 
 mod mcp;
 
+use std::cell::RefCell;
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tessra_daemon::client;
+use tessra_daemon::principals::Actor;
 use tessra_daemon::server::{self, Endpoint, Request};
 use tessra_daemon::{verbs, InitOptions, Repo};
 
@@ -33,6 +37,9 @@ struct Cli {
     /// Act as an external principal the daemon holds a key for, such as a CI system granted with `tessra grant`.
     #[arg(long = "as", global = true)]
     as_principal: Option<String>,
+    /// The credential for acting as the owner (policy verbs) or as the principal named by --as. Also read from TESSRA_CREDENTIAL, and asked for at a terminal when a call needs it.
+    #[arg(long, global = true, env = "TESSRA_CREDENTIAL", hide_env_values = true)]
+    credential: Option<String>,
     /// Render for humans instead of printing JSON.
     #[arg(long, global = true)]
     pretty: bool,
@@ -457,6 +464,11 @@ fn run() -> i32 {
                     "repo_id": repo.repo_id.to_letters(),
                     "daemon": repo.daemon.to_letters(),
                     "cloud_synced_repo": tessra_daemon::paths::is_cloud_synced(&repo.root),
+                    "owner_credential": std::fs::read_to_string(repo.owner_credential_path()).ok().map(|s| s.trim().to_string()),
+                    "owner_credential_note": format!(
+                        "what makes you the owner beyond reaching the daemon: standard, hook, channel, target, grant, revoke, config --set, attest, revert, and undo ask for it (--credential, TESSRA_CREDENTIAL, or the prompt). It stays in {} until you move it somewhere agents cannot read; the daemon keeps only its hash",
+                        repo.owner_credential_path().display()
+                    ),
                 }
             }),
             Err(e) => json!({ "ok": false, "code": e.code(), "message": e.to_string() }),
@@ -517,6 +529,9 @@ fn run() -> i32 {
     } else {
         client::ensure(&tessra_dir, &exe, &root, true)
     };
+    // The credential travels with every call; a terminal can supply it after
+    // a refusal, so the cell is shared with the retry below.
+    let credential: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(cli.credential.clone()));
     // One verb call, into the daemon or into this process.
     type Caller = Box<dyn FnMut(&str, &Value) -> Value>;
     let mut caller: Caller = match endpoint {
@@ -525,6 +540,7 @@ fn run() -> i32 {
             let model = cli.model.clone();
             let workspace = cli.workspace.clone();
             let principal = cli.as_principal.clone();
+            let credential = Rc::clone(&credential);
             Box::new(move |verb: &str, args: &Value| {
                 let req = Request {
                     token: endpoint.token.clone(),
@@ -533,6 +549,7 @@ fn run() -> i32 {
                     write: write.clone(),
                     workspace: workspace.clone(),
                     principal: principal.clone(),
+                    credential: credential.borrow().clone(),
                     verb: verb.to_string(),
                     args: args.clone(),
                 };
@@ -552,37 +569,47 @@ fn run() -> i32 {
                     return 2;
                 }
             };
-            let mut actor = match (&cli.as_principal, &cli.agent) {
-                (Some(name), _) => match repo.open_external(name) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        print(
-                            &json!({ "ok": false, "code": e.code(), "message": e.to_string() }),
-                            cli.pretty,
-                        );
-                        return 2;
+            let as_principal = cli.as_principal.clone();
+            let agent = cli.agent.clone();
+            let model = cli.model.clone();
+            let workspace = cli.workspace.clone();
+            let credential = Rc::clone(&credential);
+            // The actor is opened on the first call and kept, so a workspace
+            // it creates stays its own across the calls of one MCP session;
+            // a credential supplied after a refusal is honoured on the next.
+            let mut actor: Option<Actor> = None;
+            Box::new(move |verb: &str, args: &Value| {
+                let presented = credential.borrow().clone();
+                if actor.is_none() {
+                    let opened = match (&as_principal, &agent) {
+                        (Some(name), _) => repo.open_external(name, presented.as_deref()),
+                        (None, Some(name)) => {
+                            repo.open_session(name, model.as_deref(), write.clone())
+                        }
+                        (None, None) => Ok(repo.daemon_actor()),
+                    };
+                    match opened {
+                        Ok(mut a) => {
+                            if let Some(prefix) = &workspace {
+                                a.workspace = repo
+                                    .workspaces
+                                    .iter()
+                                    .find(|w| w.id.matches_prefix(prefix))
+                                    .map(|w| w.id);
+                            }
+                            actor = Some(a);
+                        }
+                        Err(e) => {
+                            return json!({ "ok": false, "code": e.code(), "message": e.to_string() })
+                        }
                     }
-                },
-                (None, Some(name)) => match repo.open_session(name, cli.model.as_deref(), write) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        print(
-                            &json!({ "ok": false, "code": e.code(), "message": e.to_string() }),
-                            cli.pretty,
-                        );
-                        return 2;
-                    }
-                },
-                (None, None) => repo.daemon_actor(),
-            };
-            if let Some(prefix) = &cli.workspace {
-                actor.workspace = repo
-                    .workspaces
-                    .iter()
-                    .find(|w| w.id.matches_prefix(prefix))
-                    .map(|w| w.id);
-            }
-            Box::new(move |verb: &str, args: &Value| verbs::call(&mut repo, &mut actor, verb, args))
+                }
+                let a = actor.as_mut().expect("opened above");
+                if a.kind == "daemon" && !a.credentialed {
+                    a.credentialed = repo.owner_credential_ok(presented.as_deref());
+                }
+                verbs::call(&mut repo, a, verb, args)
+            })
         }
     };
 
@@ -592,7 +619,26 @@ fn run() -> i32 {
     }
 
     let (verb, args) = to_call(&cli.cmd);
-    let out = caller(verb, &args);
+    let mut out = caller(verb, &args);
+    // A person at a terminal is asked for the credential once; nothing else
+    // reads it from anywhere.
+    if out.get("code") == Some(&json!("CREDENTIAL_REQUIRED"))
+        && credential.borrow().is_none()
+        && std::io::stdin().is_terminal()
+    {
+        let who = cli
+            .as_principal
+            .clone()
+            .unwrap_or_else(|| "the owner".into());
+        eprint!("credential for {who}: ");
+        if let Ok(secret) = rpassword::read_password() {
+            let secret = secret.trim().to_string();
+            if !secret.is_empty() {
+                *credential.borrow_mut() = Some(secret);
+                out = caller(verb, &args);
+            }
+        }
+    }
     print(&out, cli.pretty);
     if out.get("ok") != Some(&Value::Bool(true)) {
         return 1;

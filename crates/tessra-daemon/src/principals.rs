@@ -24,6 +24,10 @@ pub struct Actor {
     pub write_paths: Option<Vec<String>>,
     pub workspace: Option<EntityId>,
     pub kind: String,
+    /// The caller presented the credential this principal needs beyond the
+    /// daemon token: the owner credential for a daemon actor, the principal's
+    /// own for a human or an external. Sessions never need one.
+    pub credentialed: bool,
 }
 
 impl Actor {
@@ -32,8 +36,28 @@ impl Actor {
     }
 }
 
+/// The hash the daemon keeps of a credential. The credential itself is shown
+/// once when issued and never stored by Tessra.
+fn credential_hash(secret: &str) -> String {
+    blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
+}
+
+fn new_credential() -> String {
+    // 256 bits, as hex.
+    hex::encode(EntityId::random().0) + &hex::encode(EntityId::random().0)
+}
+
+/// Compare a presented credential to a stored hash in constant time.
+fn credential_matches(stored_hex: &str, presented: &str) -> bool {
+    match blake3::Hash::from_hex(stored_hex.trim()) {
+        Ok(stored) => stored == blake3::hash(presented.trim().as_bytes()),
+        Err(_) => false,
+    }
+}
+
 impl Repo {
-    /// The daemon as actor: the owner, acting in the root workspace.
+    /// The daemon as actor: the owner, acting in the root workspace. Not yet
+    /// credentialed; the caller that verified the owner credential sets it.
     pub fn daemon_actor(&self) -> Actor {
         Actor {
             signer: self.daemon_signer(),
@@ -41,6 +65,46 @@ impl Repo {
             write_paths: None,
             workspace: self.root_workspace().map(|w| w.id),
             kind: "daemon".into(),
+            credentialed: false,
+        }
+    }
+
+    /// The owner acting from inside the daemon itself: hooks landing a
+    /// change, the anomaly monitor revoking an agent. Trusted by construction.
+    pub fn owner_actor(&self) -> Actor {
+        let mut a = self.daemon_actor();
+        a.credentialed = true;
+        a
+    }
+
+    /// Where the owner credential lives until the owner moves it: beside
+    /// the keys, outside the repository and outside cloud sync.
+    pub fn owner_credential_path(&self) -> PathBuf {
+        self.keys_dir.join("owner.credential")
+    }
+
+    /// Make sure this repository has an owner credential. Returns the
+    /// credential when one was just issued, so `init` can print it; an
+    /// existing repository gets one on first open and the refusal that
+    /// needs it names the file.
+    pub fn ensure_owner_credential(&self) -> Result<Option<String>> {
+        let hash_path = self.keys_dir.join("owner.credential.hash");
+        if hash_path.exists() {
+            return Ok(None);
+        }
+        let secret = new_credential();
+        std::fs::create_dir_all(&self.keys_dir)?;
+        std::fs::write(&hash_path, credential_hash(&secret))?;
+        std::fs::write(self.owner_credential_path(), format!("{secret}\n"))?;
+        Ok(Some(secret))
+    }
+
+    /// Does a presented credential match the owner's?
+    pub fn owner_credential_ok(&self, presented: Option<&str>) -> bool {
+        let Some(p) = presented else { return false };
+        match std::fs::read_to_string(self.keys_dir.join("owner.credential.hash")) {
+            Ok(stored) => credential_matches(&stored, p),
+            Err(_) => false,
         }
     }
 
@@ -272,6 +336,7 @@ impl Repo {
                             write_paths: Some(write_paths),
                             workspace: None,
                             kind: "session".into(),
+                            credentialed: false,
                         });
                     }
                 }
@@ -359,7 +424,24 @@ impl Repo {
             write_paths: Some(write_paths),
             workspace: None,
             kind: "session".into(),
+            credentialed: false,
         })
+    }
+
+    /// The principal a human or external name was granted, without acting
+    /// as them: what a channel needs to know who it reaches.
+    pub fn named_principal(&self, name: &str) -> Option<EntityId> {
+        for dir in ["humans", "externals"] {
+            let (_, meta_path) = self.named_paths(dir, name);
+            if let Ok(meta) = std::fs::read_to_string(&meta_path) {
+                if let Some(first) = meta.lines().next() {
+                    if let Ok(id) = EntityId::from_letters(first.trim()) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn named_paths(&self, dir: &str, name: &str) -> (PathBuf, PathBuf) {
@@ -373,25 +455,29 @@ impl Repo {
 
     /// Create an external principal, such as a CI system, with a capability
     /// that grants `attest` and nothing else, and hold its key. The daemon
-    /// is the issuer, so only the owner reaches this.
-    pub fn grant_external(&mut self, name: &str) -> Result<(EntityId, ObjectId)> {
+    /// is the issuer, so only the owner reaches this. Returns the principal,
+    /// its capability, and the credential the external must present, which
+    /// is issued afresh on every grant and shown only in this result.
+    pub fn grant_external(&mut self, name: &str) -> Result<(EntityId, ObjectId, String)> {
         self.grant_named(name, "external")
     }
 
     /// Create a human principal the daemon holds a key for, so a person on
     /// this machine can approve with `--as <name>`. A passkey binding is the
-    /// alternative. The capability grants `attest` only.
-    pub fn grant_human(&mut self, name: &str) -> Result<(EntityId, ObjectId)> {
+    /// alternative. The capability grants `attest` only. Returns the
+    /// credential the person presents with `--as`; granting again reissues it.
+    pub fn grant_human(&mut self, name: &str) -> Result<(EntityId, ObjectId, String)> {
         self.grant_named(name, "human")
     }
 
-    fn grant_named(&mut self, name: &str, kind: &str) -> Result<(EntityId, ObjectId)> {
+    fn grant_named(&mut self, name: &str, kind: &str) -> Result<(EntityId, ObjectId, String)> {
         let dir = if kind == "human" {
             "humans"
         } else {
             "externals"
         };
         let (key_path, meta_path) = self.named_paths(dir, name);
+        let credential = new_credential();
         if let Ok(meta) = std::fs::read_to_string(&meta_path) {
             let mut lines = meta.lines();
             if let (Some(id), Some(cap)) = (lines.next(), lines.next()) {
@@ -399,7 +485,17 @@ impl Repo {
                     EntityId::from_letters(id.trim()),
                     ObjectId::from_hex(cap.trim()),
                 ) {
-                    return Ok((id, cap));
+                    // The principal exists; this grant rotates its credential.
+                    std::fs::write(
+                        &meta_path,
+                        format!(
+                            "{}\n{}\n{}\n",
+                            id.to_letters(),
+                            cap.to_hex(),
+                            credential_hash(&credential)
+                        ),
+                    )?;
+                    return Ok((id, cap, credential));
                 }
             }
         }
@@ -477,13 +573,21 @@ impl Repo {
         paths::write_key(&key_path, &key)?;
         std::fs::write(
             &meta_path,
-            format!("{}\n{}\n", id.to_letters(), cap_id.to_hex()),
+            format!(
+                "{}\n{}\n{}\n",
+                id.to_letters(),
+                cap_id.to_hex(),
+                credential_hash(&credential)
+            ),
         )?;
-        Ok((id, cap_id))
+        Ok((id, cap_id, credential))
     }
 
     /// Act as an external or human principal this daemon holds the key for.
-    pub fn open_external(&self, name: &str) -> Result<Actor> {
+    /// The caller presents the principal's credential; the daemon token alone
+    /// makes nobody a human, so an agent that can reach the daemon cannot
+    /// approve its own work.
+    pub fn open_external(&self, name: &str, credential: Option<&str>) -> Result<Actor> {
         let (ext_key, ext_meta) = self.named_paths("externals", name);
         let (hum_key, hum_meta) = self.named_paths("humans", name);
         let (key_path, meta_path, kind) = if hum_meta.exists() {
@@ -512,6 +616,33 @@ impl Repo {
                 ))
             }
         };
+        let stored = lines.next().map(str::trim).filter(|h| !h.is_empty());
+        let flag = if kind == "human" {
+            "--human"
+        } else {
+            "--external"
+        };
+        match (stored, credential) {
+            (None, _) => {
+                return Err(Error::verb(
+                    "CREDENTIAL_REQUIRED",
+                    format!("{name} has no credential yet; the owner issues one with `tessra grant {flag} {name}`, which prints it once"),
+                ))
+            }
+            (Some(_), None) => {
+                return Err(Error::verb(
+                    "CREDENTIAL_REQUIRED",
+                    format!("acting as {name} needs their credential: pass --credential, set TESSRA_CREDENTIAL, or answer the prompt"),
+                ))
+            }
+            (Some(h), Some(p)) if !credential_matches(h, p) => {
+                return Err(Error::verb(
+                    "CREDENTIAL_BAD",
+                    format!("the credential presented for {name} is not theirs; the owner reissues one with `tessra grant {flag} {name}`"),
+                ))
+            }
+            _ => {}
+        }
         let key = paths::read_key(&key_path)?;
         Ok(Actor {
             signer: Signer { principal: id, key },
@@ -519,6 +650,7 @@ impl Repo {
             write_paths: Some(vec![]),
             workspace: None,
             kind: kind.into(),
+            credentialed: true,
         })
     }
 }

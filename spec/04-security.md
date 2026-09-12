@@ -24,6 +24,8 @@ Every principal holds an Ed25519 keypair. Where the private key lives depends on
 
 A session's ops are signed by the daemon under the session's key after the daemon verifies the session token. An agent is therefore a first-class principal that cannot leak a secret it never had. When a session's `expires` passes, the daemon stops signing for it; replicas do not check expiry, because they cannot do so deterministically and the key holder already has.
 
+The daemon token in `.tessra/daemon` authenticates a client to the daemon and nothing more. Until passkeys and identity bindings are built, the daemon holds the keys of the humans and externals it created and gates their use with a per-principal credential: 256 random bits issued by `grant`, shown once in the grant's result, kept by the daemon only as a BLAKE3 hash in the principal's record, and presented with every request that acts as the principal. A request as a principal without the right credential is refused with `CREDENTIAL_REQUIRED` or `CREDENTIAL_BAD`; granting the name again rotates it. The owner is gated the same way: `init` issues an owner credential, kept as a hash beside the daemon key and in clear as `owner.credential` until the owner moves it, and the policy verbs (`standard`, `hook`, `channel`, `target`, `grant`, `revoke`, `config`, `attest`, `revert`, `undo`) refuse a daemon actor that did not present it. Verbs the standard gates, `promote` among them, and every read take the token alone. A process that can read the checkout is therefore neither the owner nor a human; the residual on a single-user machine is that the same OS user can read the keys directory, which the keychain and passkeys close.
+
 The daemon principal that performs `init` is an owner and remains one. It is the trusted computing base: it verifies every op, holds the runner keys, the vault adapter, and the channel credentials, and authors containment. The object store and op log are verifiable without it, so a corrupted daemon cannot hide what it did.
 
 ## Op verification
@@ -75,7 +77,7 @@ An approval is an attestation of kind `approval.human` whose `verifier` is the h
 4. Channel `signing` `channel`: the channel adapter's principal signs an attestation that human H replied R to the challenge. `verifier` = the human, `runner` = the channel principal, `sigkind` `ed25519`.
 5. Key-signed is distinguished from channel-attested by the absence of `runner`. A standard's `approved` with `keysigned` true requires the former.
 
-The daemon refuses an `attest` of kind `approval.human` from any principal that is not of kind `human`. M5 builds the key-signed form with keys the daemon holds for humans it created; the challenge, passkeys, and channel-attested replies are not built. A human's answer also closes the request that asked.
+The daemon refuses an `attest` of kind `approval.human` from any principal that is not of kind `human`. M5 builds the key-signed form with keys the daemon holds for humans it created, usable only with the credential their grant issued; the challenge, passkeys, and channel-attested replies are not built. A human's answer also closes the request that asked. An approval is bound to the revision it names: it applies to that revision and to the revisions the system derives from it by merging it onto a new base, whose second parent names it (a landing, a restack, a conflict merge), and not to a revision the author snapshots afterwards, even though that revision names the approved one as `prev`.
 
 Judges are sessions of agents other than the author's; a verdict from the author's own agent never counts. Their attestations are ordinary session attestations, trusted only by the `judge` predicate, never by `attest`.
 
@@ -96,7 +98,7 @@ A standard requires a minimum level with `attest` `args.env.sandbox_at_least`. D
 
 Judges are sessions with `read` over the change and the rubric and the `attest` verb only. A judge's parent agent MUST differ from the author's parent agent, and a standard's `distinct_models` requires their sessions' `model` fields to differ; those fields are self-reported by runtimes (A1).
 
-External verifiers post attestations under their own principal through an `attest` op. An owner creates such a principal with `grant --external <name>`: kind `external`, a capability whose only verb is `attest`, and a key the daemon holds so `--as <name>` acts as it; bindings to an identity provider are the alternative. A standard decides the weight of that principal's attestations. A compromised external system is contained by revoking it.
+External verifiers post attestations under their own principal through an `attest` op. An owner creates such a principal with `grant --external <name>`: kind `external`, a capability whose only verb is `attest`, and a key the daemon holds so `--as <name>` acts as it, with the credential the grant printed; bindings to an identity provider are the alternative. A standard decides the weight of that principal's attestations. A compromised external system is contained by revoking it.
 
 ## Secrets
 

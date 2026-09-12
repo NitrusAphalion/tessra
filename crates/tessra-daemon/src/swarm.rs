@@ -559,15 +559,19 @@ pub fn restack_children(
             env: None,
             index: Some(idx),
         })?;
+        // The restacked revision is the same change merged onto the new
+        // trunk: it keeps its author, and its second parent names the
+        // revision it was derived from, which is what lets the attestations
+        // on that revision, a human's approval among them, carry to it.
         let restacked = Revision {
             id: x.id,
             prev: Some(x_id),
             snapshots: BTreeMap::from([("".to_string(), snap)]),
-            parents: vec![landing_id],
+            parents: vec![landing_id, x_id],
             intent: x.intent,
             title: x.title.clone(),
             body: x.body.clone(),
-            author: repo.daemon,
+            author: x.author,
             time: now(),
             ops: x.ops.clone(),
             flags: x.flags.clone(),

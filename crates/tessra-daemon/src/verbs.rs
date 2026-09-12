@@ -152,6 +152,23 @@ fn fix_for(code: &str) -> Option<String> {
     }
 }
 
+/// Acting as the owner takes the owner credential besides the daemon
+/// token, so a process that can reach the daemon is not thereby the owner.
+/// Sessions pass through untouched, and a human or an external presented
+/// their own credential when they were opened.
+fn require_owner_credential(repo: &Repo, actor: &Actor, what: &str) -> Result<()> {
+    if actor.kind == "daemon" && !actor.credentialed {
+        return Err(Error::verb(
+            "CREDENTIAL_REQUIRED",
+            format!(
+                "{what} needs the owner credential: pass --credential, set TESSRA_CREDENTIAL, or answer the prompt; init printed it, and it stays in {} until you move it somewhere agents cannot read",
+                repo.owner_credential_path().display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub struct Outcome {
     pub result: Json,
     pub next: Vec<String>,
@@ -2644,6 +2661,7 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner edits the standard"));
     }
+    require_owner_credential(repo, actor, "editing the standard")?;
     let mut next = cur.clone();
     next.prev = Some(cur_oid);
     for r in &remove {
@@ -2743,6 +2761,9 @@ fn attest_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
             "approvals are recorded by humans through channels, never by a session or the daemon",
         ));
     }
+    // The owner's attestations satisfy standards, so recording one is a
+    // policy act.
+    require_owner_credential(repo, actor, "attesting as the owner")?;
     let ws = actor_workspace(repo, actor);
     let subject: ObjectId = match arg_str(args, "subject") {
         Some(prefix) => {
@@ -3218,6 +3239,8 @@ fn revision_lca(repo: &Repo, a: &ObjectId, b: &ObjectId) -> Result<Option<Object
 }
 
 fn undo(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
+    // The owner's recent ops are standards, grants, and landings.
+    require_owner_credential(repo, actor, "undoing as the owner")?;
     // Sessions of the same durable agent are one identity for undo.
     let view = repo.log.current_view()?;
     let vs = ViewState::new(repo.store());
@@ -3334,6 +3357,8 @@ pub fn land_revision(
 /// reverter with the original named, opened as a task. The coordinator
 /// lands it at once; anyone else proposes it.
 fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
+    // The owner's revert lands at once and a rollback moves production.
+    require_owner_credential(repo, actor, "reverting as the owner")?;
     if let Some(target) = arg_str(args, "target") {
         if actor.kind != "daemon" {
             return Err(Error::verb("SCOPE", "only the owner rolls a target back"));
@@ -3655,6 +3680,7 @@ fn revoke_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner revokes"));
     }
+    require_owner_credential(repo, actor, "revoking an agent")?;
     let name =
         arg_str(args, "name").ok_or_else(|| Error::verb("ARGS", "revoke needs --name <agent>"))?;
     let agent = repo.agent_id(name)?;
@@ -4277,6 +4303,7 @@ fn channel_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner defines channels"));
     }
+    require_owner_credential(repo, actor, "defining a channel")?;
     let name = name.unwrap_or_default();
     let kind = arg_str(args, "kind").unwrap_or("inbox");
     let mut config: BTreeMap<String, Cbor> =
@@ -4305,7 +4332,7 @@ fn channel_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outco
         .map(|a| {
             a.iter()
                 .filter_map(|v| v.as_str())
-                .filter_map(|n| repo.open_external(n).ok().map(|a| a.principal()))
+                .filter_map(|n| repo.named_principal(n))
                 .collect()
         })
         .unwrap_or_default();
@@ -4379,6 +4406,7 @@ fn config_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
         if actor.kind != "daemon" {
             return Err(Error::verb("SCOPE", "only the owner sets configuration"));
         }
+        require_owner_credential(repo, actor, "setting configuration")?;
         for kv in &sets {
             let (k, v) = kv
                 .split_once('=')
@@ -4435,6 +4463,7 @@ fn target_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcom
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner defines targets"));
     }
+    require_owner_credential(repo, actor, "defining a target")?;
     let list = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(Json::as_array)
@@ -4786,6 +4815,7 @@ fn hook_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner defines hooks"));
     }
+    require_owner_credential(repo, actor, "defining a hook")?;
     let name = name.unwrap_or_default();
     let existing = crate::hooks::all_hooks(repo)?
         .into_iter()
@@ -4864,6 +4894,7 @@ fn grant_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome
     if actor.kind != "daemon" {
         return Err(Error::verb("SCOPE", "only the owner grants principals"));
     }
+    require_owner_credential(repo, actor, "granting a principal")?;
     if let Some(agent) = arg_str(args, "to") {
         // A standing grant for an agent's sessions: extra verbs, a write
         // scope, delegability, and an op budget.
@@ -4897,10 +4928,15 @@ fn grant_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome
             &[],
         );
     }
+    let credential_note = "shown once; Tessra keeps only its hash. Present it with --credential or TESSRA_CREDENTIAL, or at the prompt; granting the same name again reissues it";
     if let Some(name) = arg_str(args, "human") {
-        let (id, cap) = repo.grant_human(name)?;
+        let (id, cap, credential) = repo.grant_human(name)?;
         return ok(
-            json!({ "principal": id.to_letters(), "kind": "human", "name": name, "capability": cap.to_hex(), "verbs": ["attest"], "use": format!("tessra --as {name} approve --request <id>") }),
+            json!({
+                "principal": id.to_letters(), "kind": "human", "name": name, "capability": cap.to_hex(), "verbs": ["attest"],
+                "credential": credential, "credential_note": credential_note,
+                "use": format!("tessra --as {name} approve --request <id>"),
+            }),
             &[],
         );
     }
@@ -4910,10 +4946,11 @@ fn grant_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome
             "grant needs --external <name>, --human <name>, or --to <agent>",
         )
     })?;
-    let (id, cap) = repo.grant_external(name)?;
+    let (id, cap, credential) = repo.grant_external(name)?;
     ok(
         json!({
             "principal": id.to_letters(), "kind": "external", "name": name, "capability": cap.to_hex(), "verbs": ["attest"],
+            "credential": credential, "credential_note": credential_note,
             "use": format!("tessra --as {name} attest --kind ci.pass --subject <snapshot or revision> --result true"),
         }),
         &[],
@@ -5290,7 +5327,8 @@ mod tests {
             },
         )
         .unwrap();
-        let actor = repo.daemon_actor();
+        // The owner at a terminal, credential presented.
+        let actor = repo.owner_actor();
         (dir, repo, actor)
     }
 
@@ -5897,5 +5935,216 @@ mod tests {
         assert_eq!(fit_suffix(text, 200), 0);
         // Escapes cost: eight characters of room hold fewer than eight bytes of tabs.
         assert!(fit_prefix("\t\t\t\t\t\t\t\t", 8) < 8);
+    }
+
+    #[test]
+    fn owner_policy_verbs_need_the_owner_credential() {
+        let (_dir, mut repo, _) = scratch();
+        // Reaching the daemon is not being the owner.
+        let mut owner = repo.daemon_actor();
+        assert!(!owner.credentialed);
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "require": ["attest(tests.pass)"] }),
+        );
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+        // Reads stay free.
+        let out = call(&mut repo, &mut owner, "standard", &json!({}));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "grant", &json!({ "human": "maria" }));
+        assert_eq!(out["code"], json!("CREDENTIAL_REQUIRED"), "{out}");
+        // The credential init issued is what makes the owner.
+        let secret = std::fs::read_to_string(repo.owner_credential_path()).unwrap();
+        assert!(repo.owner_credential_ok(Some(secret.trim())));
+        assert!(!repo.owner_credential_ok(Some("nope")));
+        assert!(!repo.owner_credential_ok(None));
+        owner.credentialed = repo.owner_credential_ok(Some(secret.trim()));
+        let out = call(&mut repo, &mut owner, "grant", &json!({ "human": "maria" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let credential = out["result"]["credential"].as_str().unwrap().to_string();
+        assert_eq!(credential.len(), 64);
+        // Maria is reached only with hers: the token alone or a wrong one is refused.
+        assert_eq!(
+            repo.open_external("maria", None)
+                .err()
+                .expect("refused")
+                .code(),
+            "CREDENTIAL_REQUIRED"
+        );
+        assert_eq!(
+            repo.open_external("maria", Some("wrong"))
+                .err()
+                .expect("refused")
+                .code(),
+            "CREDENTIAL_BAD"
+        );
+        assert_eq!(
+            repo.open_external("maria", Some(&credential)).unwrap().kind,
+            "human"
+        );
+        // Granting the same name again rotates the credential.
+        let out = call(&mut repo, &mut owner, "grant", &json!({ "human": "maria" }));
+        let rotated = out["result"]["credential"].as_str().unwrap().to_string();
+        assert_ne!(rotated, credential);
+        assert_eq!(
+            repo.open_external("maria", Some(&credential))
+                .err()
+                .expect("refused")
+                .code(),
+            "CREDENTIAL_BAD"
+        );
+        assert!(repo.open_external("maria", Some(&rotated)).is_ok());
+        // A channel still finds her without acting as her.
+        assert!(repo.named_principal("maria").is_some());
+    }
+
+    #[test]
+    fn an_approval_binds_to_the_revision_it_was_given_on() {
+        let (_dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "forbid": ["structural(test.weakened) unless approved(human)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let with_test = "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one_is_one() {\n        assert_eq!(super::one(), 1);\n    }\n}\n";
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": with_test }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "grant", &json!({ "human": "maria" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let credential = out["result"]["credential"].as_str().unwrap().to_string();
+        // An agent weakens the test and proposes it.
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "create" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        bot.workspace = repo
+            .workspaces
+            .iter()
+            .find(|w| w.principal == bot.principal())
+            .map(|w| w.id);
+        let loosened =
+            with_test.replace("assert_eq!(super::one(), 1);", "assert!(super::one() > 0);");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": loosened }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "snapshot",
+            &json!({ "title": "loosen the test" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut bot, "promote", &json!({ "to": "proposed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The frontier refuses it and asks a human.
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "promote",
+            &json!({ "to": "landed", "all": true }),
+        );
+        assert_eq!(out["result"]["landed"], json!(0), "{out}");
+        let q = call(
+            &mut repo,
+            &mut owner,
+            "query",
+            &json!({ "kind": "exceptions" }),
+        );
+        let request = q["result"]["exceptions"][0]["request"]
+            .as_str()
+            .expect("an approval request")
+            .to_string();
+        let mut maria = repo.open_external("maria", Some(&credential)).unwrap();
+        let out = call(
+            &mut repo,
+            &mut maria,
+            "approve",
+            &json!({ "request": request }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The agent edits again before it lands: the approval was for what
+        // Maria saw, not for whatever comes after.
+        let loosened_more =
+            loosened.replace("assert!(super::one() > 0);", "assert!(super::one() >= 0);");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "edit",
+            &json!({ "path": "src/lib.rs", "content": loosened_more }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "snapshot",
+            &json!({ "title": "loosen it more" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut bot, "promote", &json!({ "to": "proposed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "promote",
+            &json!({ "to": "landed", "all": true }),
+        );
+        assert_eq!(
+            out["result"]["landed"],
+            json!(0),
+            "an approval on the earlier revision must not carry: {out}"
+        );
+        // Approved on the revision that will land, the landing the system
+        // derives from it carries the approval and lands.
+        let q = call(
+            &mut repo,
+            &mut owner,
+            "query",
+            &json!({ "kind": "exceptions" }),
+        );
+        let request2 = q["result"]["exceptions"][0]["request"]
+            .as_str()
+            .expect("a second request")
+            .to_string();
+        assert_ne!(request, request2);
+        let out = call(
+            &mut repo,
+            &mut maria,
+            "approve",
+            &json!({ "request": request2 }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "promote",
+            &json!({ "to": "landed", "all": true }),
+        );
+        assert_eq!(out["result"]["landed"], json!(1), "{out}");
     }
 }

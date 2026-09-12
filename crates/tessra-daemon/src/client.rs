@@ -57,6 +57,7 @@ pub fn alive(endpoint: &Endpoint) -> bool {
         write: vec![],
         workspace: None,
         principal: None,
+        credential: None,
         verb: "ping".into(),
         args: Value::Null,
     };
