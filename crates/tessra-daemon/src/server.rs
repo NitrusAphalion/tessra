@@ -296,13 +296,14 @@ mod tests {
 
     #[test]
     fn serve_and_call_over_loopback() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::paths::ScratchDir::new();
         let repo = Repo::init(
             dir.path(),
             InitOptions {
                 name: "t".into(),
                 import_git: false,
                 history: 1,
+                data_dir: Some(dir.data_dir()),
             },
         )
         .unwrap();

@@ -5315,15 +5315,17 @@ mod tests {
     use super::*;
     use crate::InitOptions;
 
-    /// A repository of its own in a temp dir, and its owner.
-    fn scratch() -> (tempfile::TempDir, Repo, Actor) {
-        let dir = tempfile::tempdir().unwrap();
+    /// A repository of its own in a temp dir, with its store, keys, and
+    /// workspaces beside it in the same temp dir, and its owner.
+    fn scratch() -> (paths::ScratchDir, Repo, Actor) {
+        let dir = paths::ScratchDir::new();
         let repo = Repo::init(
             dir.path(),
             InitOptions {
                 name: "t".into(),
                 import_git: false,
                 history: 1,
+                data_dir: Some(dir.data_dir()),
             },
         )
         .unwrap();

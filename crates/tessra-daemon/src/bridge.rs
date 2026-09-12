@@ -527,9 +527,10 @@ mod tests {
         );
     }
 
-    /// A git checkout on `main` with one commit, under Tessra.
-    fn checkout_with_one_commit() -> (tempfile::TempDir, Repo) {
-        let dir = tempfile::tempdir().unwrap();
+    /// A git checkout on `main` with one commit, under Tessra, with the
+    /// store, keys, and workspaces beside the checkout in the same temp dir.
+    fn checkout_with_one_commit() -> (crate::paths::ScratchDir, Repo) {
+        let dir = crate::paths::ScratchDir::new();
         git(dir.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
         git(dir.path(), &["add", "."]);
@@ -540,6 +541,7 @@ mod tests {
                 name: "t".into(),
                 import_git: true,
                 history: 1,
+                data_dir: Some(dir.data_dir()),
             },
         )
         .unwrap();
@@ -702,7 +704,7 @@ mod tests {
 
     #[test]
     fn an_imported_history_keeps_unit_identity_so_diff_shows_only_what_changed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::paths::ScratchDir::new();
         git(dir.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(
             dir.path().join("notes.md"),
@@ -721,6 +723,7 @@ mod tests {
                 name: "t".into(),
                 import_git: true,
                 history: 10,
+                data_dir: Some(dir.data_dir()),
             },
         )
         .unwrap();

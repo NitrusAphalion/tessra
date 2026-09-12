@@ -103,6 +103,11 @@ pub struct InitOptions {
     pub import_git: bool,
     /// How many first-parent commits to import as trunk history. At least 1.
     pub history: usize,
+    /// Where the store, keys, and workspaces go, instead of under
+    /// `paths::local_data_dir()`. Bound to the repository for the rest of
+    /// this process; another process finds them through `TESSRA_DATA_DIR`.
+    /// The tests use it to keep a scratch repository inside its tempdir.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for InitOptions {
@@ -111,6 +116,7 @@ impl Default for InitOptions {
             name: "local".into(),
             import_git: true,
             history: 100,
+            data_dir: None,
         }
     }
 }
@@ -125,6 +131,9 @@ impl Repo {
             return Err(Error::AlreadyInit(tessra_dir));
         }
         let repo_id = EntityId::random();
+        if let Some(base) = &opts.data_dir {
+            paths::bind_data_dir(&repo_id, base);
+        }
         let store_dir = paths::store_dir_for(&repo_id);
         let keys_dir = paths::keys_dir_for(&repo_id);
         std::fs::create_dir_all(&tessra_dir)?;

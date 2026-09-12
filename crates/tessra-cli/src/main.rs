@@ -453,6 +453,7 @@ fn run() -> i32 {
                 name: name.clone(),
                 import_git: !no_git,
                 history: *history,
+                data_dir: None,
             },
         ) {
             Ok(repo) => json!({
