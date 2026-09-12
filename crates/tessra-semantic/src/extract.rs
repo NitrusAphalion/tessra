@@ -431,9 +431,35 @@ const IDENT_KINDS: &[&str] = &[
     "shorthand_property_identifier_pattern",
 ];
 
+/// Synthetic tokens marking the start and end of a block the grammar
+/// delimits by indentation alone. Tree-sitter's indent and dedent tokens
+/// are zero-width, so without these a statement moved out of an `if` body
+/// would hash the same as one inside it.
+const INDENT: &[u8] = b"\x0e";
+const DEDENT: &[u8] = b"\x0f";
+
+fn is_closer(kind: &str) -> bool {
+    matches!(kind, ")" | "]" | "}" | ">")
+}
+
+/// A bracket group where a lone trailing separator carries meaning: `(1,)`
+/// is a one-element tuple and `(1)` is not.
+fn is_tuple(kind: &str) -> bool {
+    matches!(
+        kind,
+        "tuple_expression" | "tuple_type" | "tuple_pattern" | "tuple"
+    )
+}
+
 /// Tokens of a node: every leaf, comments excluded. Identifier leaves are
 /// also collected into `refs`.
+///
+/// A separator directly before the closing bracket of its group is dropped,
+/// so a formatter's trailing comma is not an edit, unless the group is a
+/// tuple holding no other separator at the same depth: the comma that makes
+/// `(1,)` a one-element tuple is kept.
 fn tokens<'a>(
+    lang: Language,
     node: TsNode<'_>,
     source: &'a [u8],
     out: &mut Vec<&'a [u8]>,
@@ -452,10 +478,32 @@ fn tokens<'a>(
         }
         return;
     }
-    let mut c = node.walk();
-    for child in node.children(&mut c) {
-        tokens(child, source, out, refs);
+    let indented = lang == Language::Python && node.kind() == "block";
+    if indented {
+        out.push(INDENT);
     }
+    let mut c = node.walk();
+    let children: Vec<TsNode<'_>> = node.children(&mut c).collect();
+    let separators = children.iter().filter(|c| c.kind() == ",").count();
+    let keep_lone = is_tuple(node.kind()) && separators == 1;
+    for (i, child) in children.iter().enumerate() {
+        if child.kind() == ","
+            && !keep_lone
+            && children.get(i + 1).is_some_and(|n| is_closer(n.kind()))
+        {
+            continue;
+        }
+        tokens(lang, *child, source, out, refs);
+    }
+    if indented {
+        out.push(DEDENT);
+    }
+}
+
+/// Whether a prefix node is a doc comment, which hashes as one token. A
+/// Python comment before a definition is a plain comment and never hashes.
+fn is_doc(lang: Language, node: TsNode<'_>) -> bool {
+    lang != Language::Python && COMMENT_KINDS.contains(&node.kind())
 }
 
 /// A function is a test when its language marks it so: a `#[test]` or
@@ -481,23 +529,17 @@ fn is_skipped(lang: Language, prefix: &str, name: &str) -> bool {
     }
 }
 
-/// Two normalizations before hashing. A separator directly before a closing
-/// bracket is dropped, so a formatter's trailing comma is not an edit. The
-/// unit's own name is dropped once, so a pure rename keeps its body hash and
-/// the matcher can recognize it; identity by name is a separate step.
-fn normalize_tokens(toks: &mut Vec<&[u8]>, name: &[u8]) {
-    let mut i = 0;
-    while i + 1 < toks.len() {
-        if toks[i] == b"," && matches!(toks[i + 1], b")" | b"]" | b"}" | b">") {
-            toks.remove(i);
-        } else {
-            i += 1;
-        }
+/// The unit's own name is dropped once from its item tokens, those after
+/// `from`, so a pure rename keeps its body hash and the matcher can
+/// recognize it; identity by name is a separate step. The prefix before
+/// `from` is left alone: a doc comment or attribute that happens to spell
+/// the name is not the declaration.
+fn drop_own_name(toks: &mut Vec<&[u8]>, from: usize, name: &[u8]) {
+    if name.is_empty() {
+        return;
     }
-    if !name.is_empty() {
-        if let Some(pos) = toks.iter().position(|t| *t == name) {
-            toks.remove(pos);
-        }
+    if let Some(pos) = toks[from..].iter().position(|t| *t == name) {
+        toks.remove(from + pos);
     }
 }
 
@@ -509,7 +551,10 @@ fn collect(
     children_setlike: bool,
     out: &mut Vec<RawNode>,
 ) {
-    let mut prefix_start: Option<usize> = None;
+    // The attributes, decorators, and doc comments waiting to attach to the
+    // next unit. They are part of its span and of its body hash: adding a
+    // `#[cfg]`, extending a derive, or editing a doc comment is an edit.
+    let mut prefix: Vec<TsNode<'_>> = Vec::new();
     let mut cursor = container.walk();
     let children: Vec<TsNode<'_>> = container.children(&mut cursor).collect();
     for child in children {
@@ -517,11 +562,7 @@ fn collect(
             continue;
         }
         match classify(lang, child, source) {
-            Class::Prefix => {
-                if prefix_start.is_none() {
-                    prefix_start = Some(child.start_byte());
-                }
-            }
+            Class::Prefix => prefix.push(child),
             Class::Skip => {}
             Class::Unit {
                 kind,
@@ -530,11 +571,29 @@ fn collect(
                 body,
                 children_setlike: kids_setlike,
             } => {
-                let start = prefix_start.take().unwrap_or(child.start_byte());
-                let mut toks = Vec::new();
+                let prefix: Vec<TsNode<'_>> = std::mem::take(&mut prefix);
+                let start = prefix
+                    .first()
+                    .map(|p| p.start_byte())
+                    .unwrap_or(child.start_byte());
+                let docs: Vec<String> = prefix
+                    .iter()
+                    .filter(|p| is_doc(lang, **p))
+                    .map(|p| one_line(text(*p, source)))
+                    .collect();
+                let mut docs_left = docs.iter();
+                let mut toks: Vec<&[u8]> = Vec::new();
                 let mut raw_refs = Vec::new();
-                tokens(child, source, &mut toks, &mut raw_refs);
-                normalize_tokens(&mut toks, name.as_bytes());
+                for p in &prefix {
+                    if is_doc(lang, *p) {
+                        toks.push(docs_left.next().map(String::as_bytes).unwrap_or(b""));
+                    } else if !COMMENT_KINDS.contains(&p.kind()) {
+                        tokens(lang, *p, source, &mut toks, &mut raw_refs);
+                    }
+                }
+                let item_from = toks.len();
+                tokens(lang, child, source, &mut toks, &mut raw_refs);
+                drop_own_name(&mut toks, item_from, name.as_bytes());
                 let mut refs: Vec<String> = raw_refs
                     .into_iter()
                     .filter_map(|r| std::str::from_utf8(r).ok())
@@ -707,6 +766,100 @@ impl Point {
         assert_eq!(a[0].body, b[0].body);
         let c = with_grammar(Language::Rust, b"fn f(a: i32) -> i32 { a + 2 }").unwrap();
         assert_ne!(a[0].body, c[0].body);
+    }
+
+    #[test]
+    fn attributes_and_doc_comments_are_in_the_body_hash() {
+        let hash = |src: &str| with_grammar(Language::Rust, src.as_bytes()).unwrap()[0].body;
+        assert_ne!(
+            hash("#[derive(Debug)]\nstruct S;\n"),
+            hash("#[derive(Debug, Clone)]\nstruct S;\n"),
+            "a derive extended is an edit"
+        );
+        assert_ne!(
+            hash("fn f() {}\n"),
+            hash("#[cfg(test)]\nfn f() {}\n"),
+            "an attribute added is an edit"
+        );
+        assert_ne!(
+            hash("/// Adds one.\nfn f() {}\n"),
+            hash("/// Adds two.\nfn f() {}\n"),
+            "a doc comment edited is an edit"
+        );
+        assert_eq!(
+            hash("/// Adds one.\nfn f() {}\n"),
+            hash("///   Adds   one.\nfn f() {}\n"),
+            "a doc comment's whitespace is not"
+        );
+        assert_eq!(
+            hash("// plain\nfn f() {}\n"),
+            hash("// other\nfn f() {}\n"),
+            "a plain comment stays out of the hash"
+        );
+        assert_eq!(
+            hash("fn f() {}\n"),
+            hash("/* note */\nfn f() {}\n"),
+            "a plain block comment stays out of the hash"
+        );
+        // The name is still dropped from the item, not from the prefix, so a
+        // rename under an attribute is a rename.
+        assert_eq!(
+            hash("#[inline]\nfn f() { 1 }\n"),
+            hash("#[inline]\nfn g() { 1 }\n")
+        );
+        let ts = |src: &str| with_grammar(Language::TypeScript, src.as_bytes()).unwrap()[0].body;
+        assert_ne!(
+            ts("/** one */\nfunction f() {}\n"),
+            ts("/** two */\nfunction f() {}\n")
+        );
+    }
+
+    #[test]
+    fn python_indentation_is_in_the_body_hash() {
+        let hash = |src: &str| with_grammar(Language::Python, src.as_bytes()).unwrap()[0].body;
+        let inside = "def f(x):\n    if x:\n        y = 1\n        return y\n";
+        let outside = "def f(x):\n    if x:\n        y = 1\n    return y\n";
+        assert_ne!(hash(inside), hash(outside));
+        assert_eq!(
+            hash(inside),
+            hash("def f(x):\n  if x:\n    y = 1\n    return y\n"),
+            "the width of the indentation is formatting"
+        );
+        // A comment before a definition is a plain comment.
+        assert_eq!(
+            hash("# one\ndef f():\n    pass\n"),
+            hash("# two\ndef f():\n    pass\n")
+        );
+    }
+
+    #[test]
+    fn a_one_element_tuple_keeps_its_comma() {
+        let py = |src: &str| with_grammar(Language::Python, src.as_bytes()).unwrap()[0].body;
+        assert_ne!(
+            py("def f():\n    return (1,)\n"),
+            py("def f():\n    return (1)\n")
+        );
+        assert_eq!(
+            py("def f():\n    return (1, 2,)\n"),
+            py("def f():\n    return (1, 2)\n"),
+            "a trailing comma after two elements is formatting"
+        );
+        let rs = |src: &str| with_grammar(Language::Rust, src.as_bytes()).unwrap()[0].body;
+        assert_ne!(rs("fn f() { (1,) }"), rs("fn f() { (1) }"));
+        assert_ne!(
+            rs("fn f() -> (i32,) { (1,) }"),
+            rs("fn f() -> (i32) { (1,) }")
+        );
+        assert_eq!(rs("fn f() { (1, 2,) }"), rs("fn f() { (1, 2) }"));
+        // Outside a tuple a lone trailing comma is what a formatter writes
+        // when it breaks a one-element list across lines.
+        assert_eq!(rs("fn f(a: i32) {}"), rs("fn f(\n    a: i32,\n) {}"));
+        assert_eq!(
+            rs("fn f() { g(1) }"),
+            rs("fn f() {\n    g(\n        1,\n    )\n}")
+        );
+        assert_eq!(rs("struct S { a: i32 }"), rs("struct S {\n    a: i32,\n}"));
+        assert_eq!(py("X = [1]\n"), py("X = [1,]\n"));
     }
 
     #[test]
