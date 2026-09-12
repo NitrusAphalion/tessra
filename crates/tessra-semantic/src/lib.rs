@@ -7,6 +7,7 @@
 //! previous version of the file. Files without a grammar fall back to chunks.
 
 pub mod extract;
+pub mod imports;
 pub mod matching;
 pub mod merge;
 pub mod rename;

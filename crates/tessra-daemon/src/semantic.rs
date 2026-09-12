@@ -45,8 +45,11 @@ pub fn build_nodes(
     }
     let mut out: Vec<Node> = Vec::new();
     // References of re-extracted units that did not resolve within their
-    // file, resolved below against the top-level units of the whole root.
+    // file, resolved below against the top-level units of the files the
+    // file imports, and never against the whole root: a bare `Error` or
+    // `describe` must not bind to a same-named unit in an unrelated package.
     let mut pending: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut imports_of: HashMap<String, Vec<String>> = HashMap::new();
     for (path, leaf) in flat {
         if leaf.kind != EntryKind::File {
             continue;
@@ -69,31 +72,62 @@ pub fn build_nodes(
             .map(|v| v.iter().map(|n| (*n).clone()).collect())
             .unwrap_or_default();
         let (nodes, unresolved) = assign_ids_with_refs(path, &raw, &previous);
+        let mut left_any = false;
         for (i, left) in unresolved.into_iter().enumerate() {
             if !left.is_empty() {
                 pending.push((out.len() + i, left));
+                left_any = true;
             }
+        }
+        if left_any {
+            let statements: Vec<&str> = raw
+                .iter()
+                .filter(|r| r.kind == "import" || r.kind == "export")
+                .map(|r| r.name.as_str())
+                .collect();
+            let imported = tessra_semantic::imports::imported_paths(path, &statements, &|p| {
+                flat.contains_key(p)
+            });
+            imports_of.insert(path.clone(), imported);
         }
         out.extend(nodes);
     }
     if !pending.is_empty() {
-        // Top-level units by name across the root; only unambiguous names resolve.
-        let mut by_name: HashMap<&str, Option<EntityId>> = HashMap::new();
+        // Top-level units by path, then name.
+        let mut by_path: HashMap<&str, HashMap<&str, Vec<EntityId>>> = HashMap::new();
         for n in &out {
             if n.parent.is_none() && is_ident(&n.name) {
-                by_name
+                by_path
+                    .entry(n.path.as_str())
+                    .or_default()
                     .entry(n.name.as_str())
-                    .and_modify(|e| *e = None)
-                    .or_insert(Some(n.nid));
+                    .or_default()
+                    .push(n.nid);
             }
         }
         let resolved: Vec<(usize, Vec<EntityId>)> = pending
             .iter()
             .map(|(i, names)| {
+                let unit = &out[*i];
+                let files: &[String] = imports_of.get(&unit.path).map(Vec::as_slice).unwrap_or(&[]);
+                // A name resolves when exactly one imported file defines it.
                 let ids: Vec<EntityId> = names
                     .iter()
-                    .filter_map(|n| by_name.get(n.as_str()).copied().flatten())
-                    .filter(|id| *id != out[*i].nid)
+                    .filter_map(|name| {
+                        let mut found: Vec<EntityId> = files
+                            .iter()
+                            .filter_map(|f| by_path.get(f.as_str()))
+                            .filter_map(|m| m.get(name.as_str()))
+                            .flatten()
+                            .copied()
+                            .collect();
+                        found.sort();
+                        found.dedup();
+                        match found.as_slice() {
+                            [one] if *one != unit.nid => Some(*one),
+                            _ => None,
+                        }
+                    })
                     .collect();
                 (*i, ids)
             })
@@ -748,6 +782,81 @@ mod tests {
     fn nodes(path: &str, src: &str, prev: &[Node]) -> Vec<Node> {
         let raw = extract(path, src.as_bytes()).unwrap();
         assign_ids(path, &raw, prev)
+    }
+
+    #[test]
+    fn references_resolve_through_imports_and_never_repository_wide() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(&dir.path().join("o.redb")).unwrap();
+        let mut flat = Flat::new();
+        let mut put = |path: &str, text: &str| {
+            flat.insert(
+                path.to_string(),
+                Leaf::file(store.put_blob(text.as_bytes()).unwrap(), false),
+            );
+        };
+        // A story in another package defines a unit named Error; a docsite
+        // module defines describe; neither is imported by the adapter.
+        put(
+            "basecomponents/src/lib/Badge/Badge.stories.js",
+            "export function Error() { return 1; }\n",
+        );
+        put(
+            "docsite/src/lib/reference/options.ts",
+            "export function describe() { return 2; }\n",
+        );
+        put(
+            "platform/src/lib/adapters/kalshi/keys.ts",
+            "export function parseKey(s: string) { return s; }\n",
+        );
+        put(
+            "platform/src/lib/adapters/kalshi/signing.ts",
+            "import { parseKey } from './keys';\nexport class KalshiSigningError extends Error {}\nexport function sign(k: string) { return parseKey(k); }\n",
+        );
+        put(
+            "platform/src/lib/adapters/kalshi/signing.test.ts",
+            "import { describe, it } from 'vitest';\nimport { sign } from './signing';\ndescribe('sign', () => { it('works', () => sign('k')); });\n",
+        );
+        let nodes = build_nodes(&store, &flat, None).unwrap();
+        let find = |path: &str, name: &str| {
+            nodes
+                .iter()
+                .find(|n| n.path == path && n.name == name)
+                .unwrap_or_else(|| panic!("{path}:{name}"))
+                .clone()
+        };
+        let story_error = find("basecomponents/src/lib/Badge/Badge.stories.js", "Error");
+        let docsite_describe = find("docsite/src/lib/reference/options.ts", "describe");
+        let parse_key = find("platform/src/lib/adapters/kalshi/keys.ts", "parseKey");
+        let sign = find("platform/src/lib/adapters/kalshi/signing.ts", "sign");
+        let error_class = find(
+            "platform/src/lib/adapters/kalshi/signing.ts",
+            "KalshiSigningError",
+        );
+        let deps = |n: &Node| n.deps.clone().unwrap_or_default();
+        assert!(
+            !deps(&error_class).contains(&story_error.nid),
+            "the global Error is not the story's unit"
+        );
+        assert!(
+            deps(&sign).contains(&parse_key.nid),
+            "an imported name resolves to the imported file's unit"
+        );
+        for n in nodes
+            .iter()
+            .filter(|n| n.path == "platform/src/lib/adapters/kalshi/signing.test.ts")
+        {
+            assert!(
+                !deps(n).contains(&docsite_describe.nid),
+                "vitest's describe is not the docsite's unit: {}",
+                n.name
+            );
+        }
+        let test_import = find(
+            "platform/src/lib/adapters/kalshi/signing.test.ts",
+            "import { sign } from './signing';",
+        );
+        assert!(deps(&test_import).contains(&sign.nid));
     }
 
     #[test]
