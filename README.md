@@ -510,6 +510,7 @@ Start with [VISION.md](docs/VISION.md). The rest are companions it links to.
 | [ROADMAP.md](docs/ROADMAP.md) | Milestones M0 through M8, each defined by a demo |
 | [MEMORY.md](docs/MEMORY.md) | Memory as typed objects in the graph. Agents record and recall through the VCS |
 | [PARALLELISM.md](docs/PARALLELISM.md) | Many agents in one repository and one file, without a merge queue |
+| [SYNC.md](docs/SYNC.md) | One repository on many machines: what replicates, who lands, how a machine joins, and the order it gets built in |
 | [PIPELINE.md](docs/PIPELINE.md) | Standards, verifiers, stages, and review by exception |
 | [TESTING.md](docs/TESTING.md) | Tests as nodes, coverage as a node-level relation, tests as proof |
 | [LIFECYCLE.md](docs/LIFECYCLE.md) | No screens, agents as the interface, channels, intent to production |

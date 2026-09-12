@@ -132,6 +132,7 @@ Git wire-protocol compatibility beyond the bridge. Submodules, which multi-root 
 - TENETS.md: constraints derived from how models work. The tiebreaker when scope is argued.
 - MEMORY.md: memory as typed objects in the graph. Agents record and recall through the VCS; humans set up nothing.
 - PARALLELISM.md: how many agents work in one repository and one file without a merge queue.
+- SYNC.md: one repository on many machines. What replicates, who lands, how a machine joins, the remote, and the order it gets built in.
 - PIPELINE.md: standards, verifiers, stages, and review by exception. How fully automated flows stay trustworthy.
 - TESTING.md: tests as nodes, coverage as a node-level relation, tests as proof of a change, guards against weakened tests.
 - LIFECYCLE.md: no screens, agents as the interface, channels for human decisions, and intent to production.

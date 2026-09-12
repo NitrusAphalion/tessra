@@ -6,6 +6,7 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ### Added
 
+- A design document, docs/SYNC.md, for one repository on many machines: what replicates, who lands, how a machine joins, a blob-store remote before any socket, and the five steps that build it, each with its demo. The spec already carried the mechanism; this sequences it.
 - A CI workflow runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test --workspace` on every pull request and push to `main`, on Ubuntu, macOS, and Windows, and checks the workspace builds with the declared minimum Rust.
 - `TESSRA_DATA_DIR` overrides where the store, keys, and workspaces live, and `InitOptions::data_dir` does the same for one repository. The test suite uses it so a run leaves nothing under the local application data directory.
 - An end-to-end test of the MCP server through the built binary: `initialize`, `tools/list`, and a `tessra_status` call.
