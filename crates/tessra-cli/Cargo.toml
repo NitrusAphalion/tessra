@@ -17,3 +17,6 @@ tessra-daemon = { path = "../tessra-daemon" }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"
