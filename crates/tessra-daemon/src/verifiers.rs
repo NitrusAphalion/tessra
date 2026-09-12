@@ -273,12 +273,31 @@ pub fn verifiers_for(repo: &Repo, dir: &Path) -> Vec<Verifier> {
     out
 }
 
+/// Tools that run on Node: their fingerprint records `node --version` too.
+const NODE_TOOLS: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "corepack"];
+
+/// The tool a verifier's environment is fingerprinted by: the command's
+/// first word, or the word after the flags when the command is wrapped in
+/// `cmd /c` for Windows, where `cmd --version` would say nothing useful.
+fn fingerprint_tool(argv: &[String]) -> Option<&str> {
+    let mut words = argv.iter().map(String::as_str);
+    let first = words.next()?;
+    let stem = Path::new(first)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first);
+    if stem.eq_ignore_ascii_case("cmd") {
+        return words.find(|w| !w.starts_with('/'));
+    }
+    Some(first)
+}
+
 /// The environment fingerprint for a verifier run, stored once per distinct
 /// toolchain so the cache keys on it.
 pub fn environment(repo: &Repo, v: &Verifier) -> Result<ObjectId> {
     let mut tools = BTreeMap::new();
     let probe = |cmd: &str| -> Option<String> {
-        let out = crate::quiet(Command::new(cmd))
+        let out = crate::quiet(Command::new(crate::program(cmd)))
             .arg("--version")
             .output()
             .ok()?;
@@ -289,13 +308,18 @@ pub fn environment(repo: &Repo, v: &Verifier) -> Result<ObjectId> {
             Some(s.lines().next().unwrap_or("").to_string())
         }
     };
-    let tool = v.argv.first().map(String::as_str).unwrap_or("");
+    let tool = fingerprint_tool(&v.argv).unwrap_or("");
     if let Some(ver) = probe(tool) {
         tools.insert(tool.to_string(), ver);
     }
     if tool == "cargo" {
         if let Some(ver) = probe("rustc") {
             tools.insert("rustc".into(), ver);
+        }
+    }
+    if NODE_TOOLS.contains(&tool) {
+        if let Some(ver) = probe("node") {
+            tools.insert("node".into(), ver);
         }
     }
     let env = Environment {
@@ -438,7 +462,7 @@ pub fn run(
         (Filter::Pytest, true) => argv.push("-v".into()),
         _ => {}
     }
-    let mut cmd = crate::quiet(Command::new(&argv[0]));
+    let mut cmd = crate::quiet(Command::new(crate::program(&argv[0])));
     cmd.args(&argv[1..]);
     cmd.current_dir(dir);
     cmd.env_clear();
@@ -757,6 +781,23 @@ mod tests {
     fn nodes(path: &str, src: &str) -> Vec<Node> {
         let raw = tessra_semantic::extract(path, src.as_bytes()).unwrap();
         assign_ids(path, &raw, &[])
+    }
+
+    #[test]
+    fn the_fingerprint_names_the_tool_behind_a_cmd_wrapper() {
+        let plain: Vec<String> = ["cargo", "test"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(fingerprint_tool(&plain), Some("cargo"));
+        let wrapped: Vec<String> = ["cmd", "/d", "/c", "pnpm", "test"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fingerprint_tool(&wrapped), Some("pnpm"));
+        let exe: Vec<String> = ["CMD.EXE", "/C", "npm", "test"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fingerprint_tool(&exe), Some("npm"));
+        assert_eq!(fingerprint_tool(&[]), None);
     }
 
     #[test]

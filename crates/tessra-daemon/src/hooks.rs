@@ -240,7 +240,7 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             if argv.is_empty() {
                 return Err(Error::verb("HOOK", "run needs a command"));
             }
-            let mut c = crate::quiet(Command::new(&argv[0]));
+            let mut c = crate::quiet(Command::new(crate::program(&argv[0])));
             c.args(&argv[1..]);
             c.current_dir(&repo.root);
             c.env(
@@ -414,7 +414,7 @@ fn run_action(repo: &mut Repo, hook: &Hook, action: &HookAction, event: &Event) 
             std::fs::create_dir_all(&log_dir)?;
             let log = std::fs::File::create(log_dir.join(format!("{name}-{t}.log")))?;
             let err = log.try_clone()?;
-            let mut c = crate::quiet(Command::new(&argv[0]));
+            let mut c = crate::quiet(Command::new(crate::program(&argv[0])));
             c.args(&argv[1..]);
             c.current_dir(&repo.root);
             c.env("TESSRA_AGENT", &name);

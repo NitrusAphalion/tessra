@@ -345,7 +345,7 @@ fn run_adapter(
     if argv.is_empty() {
         return Err(Error::verb("ADAPTER", "empty command"));
     }
-    let mut c = crate::quiet(Command::new(&argv[0]));
+    let mut c = crate::quiet(Command::new(crate::program(&argv[0])));
     c.args(&argv[1..]);
     if let Some(d) = cwd {
         c.current_dir(d);

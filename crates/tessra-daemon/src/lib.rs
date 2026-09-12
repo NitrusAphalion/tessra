@@ -400,3 +400,62 @@ pub(crate) fn quiet(cmd: std::process::Command) -> std::process::Command {
     };
     cmd
 }
+
+/// The program to spawn for the first word of a command line. On Windows a
+/// bare name is resolved through `PATH` and `PATHEXT` the way a shell does,
+/// which `Command::new` does not: the Node installer ships `npm.cmd` and no
+/// `npm.exe`, so `npm` works from any shell and fails from a spawn. A name
+/// that carries an extension or a directory is returned as it is, and so is
+/// one that resolves to nothing, so the spawn reports the error.
+pub(crate) fn program(name: &str) -> String {
+    #[cfg(windows)]
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        if let Some(found) = find_program(name, &path, &pathext) {
+            return found.display().to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Search the directories of `path` for `name` with each extension in
+/// `pathext`, in order. `None` when `name` already names an extension or a
+/// directory, or when no directory holds a match.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn find_program(name: &str, path: &std::ffi::OsStr, pathext: &str) -> Option<PathBuf> {
+    let p = Path::new(name);
+    if p.extension().is_some() || p.components().count() != 1 {
+        return None;
+    }
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
+            let candidate = dir.join(format!("{name}{}", ext.to_ascii_lowercase()));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::find_program;
+
+    #[test]
+    fn a_bare_name_resolves_through_pathext_and_names_with_extensions_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("npm.cmd"), "@echo off\r\n").unwrap();
+        std::fs::write(dir.path().join("npm"), "#!/bin/sh\n").unwrap();
+        let path = std::env::join_paths([dir.path().to_path_buf()]).unwrap();
+        let found = find_program("npm", &path, ".COM;.EXE;.BAT;.CMD").unwrap();
+        assert_eq!(found, dir.path().join("npm.cmd"));
+        assert_eq!(find_program("node", &path, ".COM;.EXE;.BAT;.CMD"), None);
+        assert_eq!(find_program("npm.cmd", &path, ".COM;.EXE;.BAT;.CMD"), None);
+        assert_eq!(find_program("./npm", &path, ".COM;.EXE;.BAT;.CMD"), None);
+    }
+}
