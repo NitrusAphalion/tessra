@@ -543,6 +543,31 @@ fn drop_own_name(toks: &mut Vec<&[u8]>, from: usize, name: &[u8]) {
     }
 }
 
+/// The distinct token bigrams of a unit, hashed and sorted, with every
+/// occurrence of its own name removed first, so a rename plus an edit
+/// still resembles what it came from. Compared by Jaccard overlap in the
+/// matcher; single tokens would make every small function look alike.
+fn shingles(toks: &[&[u8]], name: &[u8]) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let kept: Vec<&[u8]> = toks
+        .iter()
+        .copied()
+        .filter(|t| name.is_empty() || *t != name)
+        .collect();
+    let mut out: Vec<u64> = kept
+        .windows(2)
+        .map(|w| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            w[0].hash(&mut h);
+            w[1].hash(&mut h);
+            h.finish()
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn collect(
     lang: Language,
     container: TsNode<'_>,
@@ -615,6 +640,7 @@ fn collect(
                 } else {
                     kind
                 };
+                let shingles = shingles(&toks, name.as_bytes());
                 out.push(RawNode {
                     kind: kind.into(),
                     name,
@@ -623,6 +649,7 @@ fn collect(
                     parent,
                     setlike: setlike || children_setlike,
                     refs,
+                    shingles,
                 });
                 if let Some(b) = body {
                     collect(lang, b, source, Some(idx), kids_setlike, out);
@@ -650,6 +677,7 @@ pub fn chunks(source: &[u8]) -> Vec<RawNode> {
                     parent: None,
                     setlike: false,
                     refs: Vec::new(),
+                    shingles: Vec::new(),
                 });
                 lines.clear();
             }

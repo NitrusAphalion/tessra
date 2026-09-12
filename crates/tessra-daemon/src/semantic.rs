@@ -71,7 +71,18 @@ pub fn build_nodes(
             .get(path.as_str())
             .map(|v| v.iter().map(|n| (*n).clone()).collect())
             .unwrap_or_default();
-        let (nodes, unresolved) = assign_ids_with_refs(path, &raw, &previous);
+        // The parent's text for the path, so a unit renamed and edited in
+        // one step can be followed by similarity.
+        let previous_source: Option<Vec<u8>> = match parent {
+            Some((pflat, _)) if !previous.is_empty() => match pflat.get(path).and_then(|l| l.r#ref)
+            {
+                Some(prev_blob) => store.get_bytes(&prev_blob)?,
+                None => None,
+            },
+            _ => None,
+        };
+        let (nodes, unresolved) =
+            assign_ids_with_refs(path, &raw, &previous, previous_source.as_deref());
         let mut left_any = false;
         for (i, left) in unresolved.into_iter().enumerate() {
             if !left.is_empty() {

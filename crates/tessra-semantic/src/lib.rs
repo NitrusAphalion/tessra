@@ -39,6 +39,11 @@ pub struct RawNode {
     /// Distinct identifiers the unit mentions, its own name excluded, sorted.
     /// Resolved to `Node.deps` against the units of the same file and root.
     pub refs: Vec<String>,
+    /// Distinct hashed token bigrams of the body, its own name removed,
+    /// sorted: what the matcher compares when a unit vanished and another
+    /// appeared under the same parent, to carry identity across a rename
+    /// that came with an edit. Empty for chunks.
+    pub shingles: Vec<u64>,
 }
 
 /// The languages with a grammar. Everything else is chunked.
