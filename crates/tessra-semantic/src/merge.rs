@@ -953,6 +953,75 @@ mod tests {
     }
 
     #[test]
+    fn twenty_sides_each_editing_a_different_function_fold_cleanly() {
+        // Twenty functions; twenty changes against the same base, each
+        // editing one of them, landed one after another: each merge is
+        // three-way between the base, the head so far, and the next side,
+        // with the head's index matched against the one before it as the
+        // daemon does after a landing.
+        let base: String = (0..20)
+            .map(|i| {
+                format!("/// Function {i}.\npub fn f{i:02}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n")
+            })
+            .collect();
+        let edit = |i: usize| match i % 4 {
+            0 => base.replace(&format!("    x + {i}\n"), &format!("    x * {i} + 1000\n")),
+            1 => base.replace(
+                &format!("pub fn f{i:02}(x: i32)"),
+                &format!("#[inline]\npub fn f{i:02}(x: i32)"),
+            ),
+            2 => base.replace(
+                &format!("/// Function {i}.\n"),
+                &format!("/// Function {i}, documented.\n"),
+            ),
+            _ => base.replace(
+                &format!("    x + {i}\n}}"),
+                &format!("    let y = x + {i};\n    y * 2\n}}"),
+            ),
+        };
+        let bn = nodes(&base, &[]);
+        let mut head = base.clone();
+        let mut head_nodes = bn.clone();
+        for i in 0..20 {
+            let side = edit(i);
+            assert_ne!(side, base, "edit {i} changes something");
+            let sn = nodes_in(Language::Rust, &side, &bn, Some(&base));
+            let m = merge_nodes(
+                Language::Rust,
+                Some((&base, &bn)),
+                (&head, &head_nodes),
+                (&side, &sn),
+                &[],
+                &[],
+            );
+            assert!(m.conflicts.is_empty(), "side {i}: {:?}", m.conflicts);
+            let next = String::from_utf8(m.text).unwrap();
+            head_nodes = nodes_in(Language::Rust, &next, &head_nodes, Some(&head));
+            head = next;
+        }
+        for i in 0..20 {
+            let expected = match i % 4 {
+                0 => format!("    x * {i} + 1000\n"),
+                1 => format!("#[inline]\npub fn f{i:02}(x: i32)"),
+                2 => format!("/// Function {i}, documented.\n"),
+                _ => format!("    let y = x + {i};\n    y * 2\n}}"),
+            };
+            assert!(head.contains(&expected), "edit {i} is present:\n{head}");
+        }
+        let reparsed = with_grammar(Language::Rust, head.as_bytes()).unwrap();
+        assert_eq!(
+            reparsed.iter().filter(|n| n.kind == "function").count(),
+            20,
+            "{head}"
+        );
+        assert_eq!(head_nodes.len(), 20);
+        assert!(
+            head_nodes.iter().all(|n| bn.iter().any(|b| b.nid == n.nid)),
+            "every function keeps its identity through twenty landings"
+        );
+    }
+
+    #[test]
     fn a_rename_onto_an_existing_name_conflicts() {
         // The base already defines bee; A renames b to bee.
         let base = format!("{BASE}\nfn bee() {{ 9 }}\n");
