@@ -879,7 +879,7 @@ fn unit_pack(
     let matches: Vec<&tessra_core::object::Node> = idx
         .nodes
         .iter()
-        .filter(|n| n.name == unit_name && unit_path.as_deref().map_or(true, |p| n.path == p))
+        .filter(|n| n.name == unit_name && unit_path.as_deref().is_none_or(|p| n.path == p))
         .collect();
     let node = match matches.len() {
         0 => return Err(Error::verb("NOT_FOUND", format!("no unit named {unit_name}; name it as path:name if it lives in a file you did not give"))),
@@ -2686,7 +2686,7 @@ fn standard_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outc
         let matches = |c: &tessra_core::object::Clause| -> bool {
             let shown = standard::describe(&c.pred);
             (shown == normalized || shown == pred_text)
-                && op_text.as_deref().map_or(true, |o| o == c.op)
+                && op_text.as_deref().is_none_or(|o| o == c.op)
         };
         next.clauses.retain(|c| !matches(c));
         let mut removed_when = false;

@@ -21,7 +21,7 @@ impl Rename {
     }
 
     pub fn applies_to(&self, path: &str) -> bool {
-        self.path.as_deref().map_or(true, |p| p == path)
+        self.path.as_deref().is_none_or(|p| p == path)
     }
 }
 

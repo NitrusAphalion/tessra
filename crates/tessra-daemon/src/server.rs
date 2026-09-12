@@ -365,13 +365,14 @@ mod tests {
 
     #[test]
     fn the_daemon_token_makes_nobody_the_owner_or_a_human() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::paths::ScratchDir::new();
         let mut repo = Repo::init(
             dir.path(),
             InitOptions {
                 name: "t".into(),
                 import_git: false,
                 history: 1,
+                data_dir: Some(dir.data_dir()),
             },
         )
         .unwrap();

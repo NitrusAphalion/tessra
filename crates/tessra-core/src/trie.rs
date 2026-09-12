@@ -199,7 +199,7 @@ impl TrieNode {
 
 fn nibble_at(key: &[u8], depth: usize) -> u8 {
     let b = key[depth / 2];
-    if depth % 2 == 0 {
+    if depth.is_multiple_of(2) {
         b >> 4
     } else {
         b & 0x0f

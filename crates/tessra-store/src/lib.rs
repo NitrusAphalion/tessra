@@ -126,7 +126,9 @@ impl RedbStore {
         };
         let bytes = v.value();
         Ok(bytes
-            .chunks_exact(32)
+            .as_chunks::<32>()
+            .0
+            .iter()
             .filter_map(|c| ObjectId::from_slice(c).ok())
             .collect())
     }

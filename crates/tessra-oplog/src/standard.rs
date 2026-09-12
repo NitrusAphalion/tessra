@@ -409,7 +409,7 @@ impl<'a> Ctx<'a> {
                 .subject
                 .as_ref()
                 .is_some_and(|s| self.subjects.iter().any(|x| x == s.as_slice()));
-            if on_us && best.map_or(true, |(t, _)| l.att.time > t) {
+            if on_us && best.is_none_or(|(t, _)| l.att.time > t) {
                 best = Some((l.att.time, &l.att));
             }
         }
