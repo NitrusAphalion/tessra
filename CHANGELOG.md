@@ -4,6 +4,10 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.0 - 2026-09-12
+
 ### Added
 
 - `import --branch <b> --history` lands the commits a branch gained as history, the way `init --history` lands the commits it imports: each commit's tree becomes the next trunk revision with a legacy intent, outside the standard, with no verifiers and no hooks. It takes the owner credential. The op verifier admits such a landing from an owner's `import` op only, on the head only; an owner could reach the same state by emptying the standard and restoring it, so it grants nothing new and keeps the record honest. History that was checked elsewhere no longer has to pass this repository's standard commit by commit, or wait on a human to approve every test it edited; a request the standard had opened for one of the commits is closed once it is history.
