@@ -446,12 +446,17 @@ pub struct RunOutcome {
 #[derive(Clone)]
 pub struct RunEnv {
     pub repo_id: EntityId,
+    /// The repository the verifier runs for. Code under test is told its
+    /// path in `TESSRA_SANDBOX` and the `tessra` command refuses to act on
+    /// it; a scratch repository of the test's own, elsewhere, is fine.
+    pub root: PathBuf,
     pub verifying: Arc<AtomicBool>,
 }
 
 pub fn run_env(repo: &Repo) -> RunEnv {
     RunEnv {
         repo_id: repo.repo_id,
+        root: repo.root.clone(),
         verifying: Arc::clone(&repo.verifying),
     }
 }
@@ -555,7 +560,7 @@ pub fn run_in(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.env("TESSRA_SANDBOX", "1");
+    cmd.env("TESSRA_SANDBOX", &env.root);
     let _guard = VerifyingGuard::enter(&env.verifying);
     let start = Instant::now();
     let mut child = cmd

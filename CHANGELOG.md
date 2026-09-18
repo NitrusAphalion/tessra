@@ -4,7 +4,25 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- `tessra workspace --action adopt`: an agent session takes the checkout it was started in as its workspace, so the files its editor, tests, and other tools see are the ones it snapshots, and its landings are exported in its name. The agent holds the checkout across its sessions until `--action release`; while it does, the owner's own `edit`, `snapshot`, and `rewind` there are refused with `HELD`, and landing or exporting what the agent snapshotted is not. Adoption is refused while the checkout carries someone else's unlanded revision.
+- Export after every landing: `tessra config --set git.export=main --set git.push=origin` makes each landing export trunk to the branch and push it, with the outcome under `export` in the landing's response.
+- The owner's `status` reports `git` when there is a checkout: the branch, the landed revisions not yet exported, and the commits not yet imported, with the command that moves them under `next`.
+- The `CLAUDE.md` and `AGENTS.md` that `tessra export` writes open with the rule for a git checkout: the repository is under Tessra, `.git/` is the owner's bridge, `promote` is the commit. This repository carries one, and a `.claude/settings.json` that refuses the git commands to a Claude Code session.
+- A test that runs the same multi-agent scenarios through git and through Tessra and prints the tally: twenty agents editing their own functions in one file, twenty each adding a function, twenty each adding an import, a rename against a new call to the old name, a reformat against an edit, and two agents editing the same function beside a third. Git's branches are merged by an unattended integrator; Tessra's agents run as concurrent processes against a daemon the test starts, and the frontier lands them. Both results are compiled. `cargo test -p tessra-cli --test versus_git -- --nocapture` prints the table, and docs/PARALLELISM.md reproduces it: git lands one of twenty additions and needs a person for the other nineteen, and merges the rename cleanly into a file that does not compile; Tessra lands all of them and carries the rename into the caller.
+
+### Changed
+
+- The agent manual, served as the MCP server's instructions, is under 2,000 characters, because that is about how much of it Claude Code passes through; the old one was 5,684 and everything after the sixth step of the loop, including every rule, was cut off unread. What moved out rides on the tool descriptions, which arrive whole, and the manual gained the rule for a git checkout: never git commit, `promote` is the commit.
+- Code under test may drive scratch repositories of its own. A verifier's `TESSRA_SANDBOX` now names the repository's root, and the `tessra` under test refuses only commands aimed at it; before, it refused everything, so the CLI's own integration tests could not pass under the repository's standard.
+- `export --format git` moves a checkout that already holds the exported content, as the checkout does when the landed change was made in it, by moving HEAD and the index to the tip without touching a file; before, a dirty checkout was left alone even when its files were the export.
+- A `NO_WORKSPACE` refusal suggests `workspace --action adopt` first, then `create`, and so does `status` for a session without a workspace in a free checkout.
+
+### Fixed
+
+- A file whose index dated from before 0.2.0 read as entirely changed the first time it was edited, and every test in it as weakened, blocking the landing under a standard that forbids that. The semantic index reuses a parent's nodes for unchanged files, so nodes built by a 0.1.x extractor kept body hashes the 0.2.0 extractor no longer produces, and the stamp every index carries was never bumped when the hashing changed. The stamp is `tessra-semantic/2` now, and an index with an older stamp is refreshed in place on first use, every unit keeping its identity, before anything is diffed against it. The refreshed index is cached under the snapshot's key, the standard's evaluation reads that key before the index a snapshot names, and the parent's index is refreshed before the standard is evaluated, so the two sides of the comparison always come from the same extractor.
+- On Windows the daemon could drop a connection whose request had not fully arrived: an accepted socket inherits the listener's non-blocking mode there, so a read that found nothing yet looked like a closed connection, and the client saw a reset. Accepted connections block now, under the read timeout the handler sets. Under a parallel test run this made the daemon's own tests flaky about half the time.
 
 ## 0.2.0 - 2026-09-12
 

@@ -141,17 +141,21 @@ fn sub_preds(p: &Predicate) -> Vec<Predicate> {
         .unwrap_or_default()
 }
 
-/// The index of a snapshot: the one it names, or the one a daemon computed
-/// and cached against the snapshot ID.
+/// The index of a snapshot: the one a daemon computed and cached against
+/// the snapshot ID, or else the one the snapshot names. The cached one
+/// wins because a daemon writes it when it refreshes an index that an
+/// older extractor built, and the snapshot, being content, cannot be told.
 pub fn index_of<S: ObjectStore>(store: &S, snap_id: &ObjectId) -> Result<Option<NodeIndex>> {
     let snap: Snapshot = store.get(snap_id)?;
-    if let Some(id) = snap.index {
-        return Ok(Some(store.get(&id)?));
-    }
     if let Some(bytes) = store.meta(&format!("idx:{}", snap_id.to_hex()))? {
         if let Ok(id) = ObjectId::from_slice(&bytes) {
-            return Ok(Some(store.get(&id)?));
+            if let Ok(idx) = store.get::<NodeIndex>(&id) {
+                return Ok(Some(idx));
+            }
         }
+    }
+    if let Some(id) = snap.index {
+        return Ok(Some(store.get(&id)?));
     }
     Ok(None)
 }

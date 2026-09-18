@@ -232,6 +232,7 @@ impl Repo {
             env: None,
             created: now(),
             expires: None,
+            holder: None,
         };
         repo.save_workspace(&ws)?;
         repo.workspaces.push(ws);

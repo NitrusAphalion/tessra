@@ -7,7 +7,7 @@ The agent surface is thirteen verbs. Each name was chosen by one test: it is the
 | status | Where am I: task, plan, claims, open questions, my change's standard status, what changed since my cursor. Resume in one call. | The first thing every agent types. Git's status is a subset of this. |
 | context | A context pack for a scope or an intent within a token budget: nodes, dependents, covering tests, memories, claims, reviews. | "Context" is the word agents use for what they need to know. |
 | query | The query language over the graph, budgeted, with cursors. Search included: text, regex, symbol, embedding. | The general read. |
-| workspace | Create, list, or drop a workspace from any snapshot. | Jujutsu, Sapling, Cargo, and editors all say workspace. |
+| workspace | Create, list, or drop a workspace from any snapshot; adopt the checkout you were started in, or release it. | Jujutsu, Sapling, Cargo, and editors all say workspace. |
 | edit | Change content in a workspace: a text patch, a node replacement, or a semantic operation such as rename, move, extract, add-parameter. | Every agent framework's mutation tool is called edit. Plain file edits through any other tool are fine; snapshot picks them up. |
 | snapshot | Record the workspace's state as a snapshot, optionally naming or updating a change. Never blocks. | Not commit, because nothing is published. |
 | claim | Claim or release nodes or paths, with expiry. Advisory. | |
@@ -61,6 +61,10 @@ Outside the set because they are rare and gated by capability: init, grant, revo
 
 Every verb accepts dry-run. Every mutating verb accepts an idempotency key, so a retry is safe. `try` and `verify` run their work in parallel inside one call. `snapshot` accepts a follow-on, so `snapshot --then verify` and `snapshot --then promote landed` make the common loop a single call.
 
+## Words
+
+A **change** has a stable ID that survives rewrites; a **snapshot** is content. A **revision** is one version of a change. **Landing** is what commit means to everyone else. A **line** is a long-lived branch such as trunk. A **standard** is the rule set a stage or target requires. An **attestation** is a signed fact from a verifier. A **claim** is a hint that you are working on something. A **context pack** is what `context` returns. The **checkout** is the directory a repository was initialized in, beside `.git/` when there is one; an agent **adopts** it to work there. **Stash** does not exist; snapshot and move on. **Rebase** is automatic.
+
 ## The manual
 
-The agent manual is this table, the response shape, and the glossary. It stays under two thousand tokens, and it is the whole onboarding surface for the users who matter most.
+The agent manual, [spec/06-manual.md](../spec/06-manual.md), is the loop, the rule for a git checkout, and the handful of rules that keep an agent out of trouble. It stays under 2,000 characters, because it is served as the MCP server's instructions and that is about how much of them Claude Code passes through; anything past that is never read. Each verb's rules ride on its tool description, which arrives whole. This table, the response shape, and the words above are the reference behind it.

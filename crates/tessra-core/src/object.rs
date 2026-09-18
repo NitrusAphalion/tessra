@@ -503,6 +503,11 @@ pub struct Workspace {
     pub created: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<i64>,
+    /// A principal other than the owner working in this directory: an agent
+    /// that adopted the colocated checkout. Its edits and snapshots are that
+    /// principal's until it releases the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<EntityId>,
 }
 object!(Workspace, "workspace");
 

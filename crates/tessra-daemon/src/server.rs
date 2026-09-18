@@ -115,6 +115,11 @@ fn accept_loop(
         }
         match listener.accept() {
             Ok((stream, _)) => {
+                // On Windows an accepted socket inherits the listener's
+                // non-blocking mode, and a request whose bytes have not all
+                // arrived would then read as a closed connection. Every
+                // connection blocks, under the read timeout `handle` sets.
+                stream.set_nonblocking(false)?;
                 let shared = Arc::clone(shared);
                 let token = token.to_string();
                 std::thread::spawn(move || handle(stream, shared, token));

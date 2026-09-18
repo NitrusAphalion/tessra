@@ -69,7 +69,7 @@ M7: lossless git export and import, reusing every commit and rewriting nothing. 
 
 ## Deviations carried from earlier milestones
 
-- Artifact chunking is fixed 1 MiB pending the FastCDC decision below. Git history import is bounded by `--history N`; lazy import through the git object database and watching `.git/refs` are scheduled later.
+- Artifact chunking is fixed 1 MiB pending the FastCDC decision below. Git history import is bounded by `--history N`; lazy import through the git object database and watching `.git/refs` are scheduled later, and until then the owner's `status` reports the commits an `import` would land.
 - Structural similarity in node matching is an interim: a unit that vanished and one that appeared under the same parent with the same kind are the same unit when their body token bigrams, own name removed, overlap by Jaccard 0.6 or more; GumTree is not implemented. The merge keys units by node ID through the aliases of base and both sides, and falls back to kind and name, body first, only for units with no shared ID. Of the `revision.ops` kinds only `rename` is recorded, and a rename is applied to identifier tokens of the parse, never to strings, comments, field accesses, or shadowing locals.
 - Coverage is the static covering-tests relation; measured `coverage.node` attestations are not produced. The verifier sandbox is L0. Secrets are flagged at snapshot, not kept out of the store.
 - Hooks run only as the daemon and fire on `proposed`, `landed`, `conflict.opened`, `released`, `deployed`, `observed`, `observed.fail`, `target.rolled_back`, `anomaly.detected`, and `anomaly.revoked`; `webhook` speaks plain HTTP. `scopes` and `audit_permille` are not evaluated; risk and observation are per change and on request.

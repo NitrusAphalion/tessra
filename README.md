@@ -51,7 +51,7 @@ Built for agents that write code around the clock, and for the humans who decide
 
 Your version control still assumes one author, one branch, and a human reading every diff.
 
-**Agents block each other.** Two agents in one file means conflict markers, a rebase, and a retry. Tessra merges functions, not lines. Agents editing different parts of the same file both land.
+**Agents block each other.** Two agents in one file means conflict markers, a rebase, and a retry. Tessra merges functions, not lines. Agents editing different parts of the same file both land. Twenty agents each adding a function to one file is nineteen conflicts in git and twenty landings here, and [the comparison is a test you can run](crates/tessra-cli/tests/versus_git.rs).
 
 **Reviews are the bottleneck.** Nobody reads as fast as agents write. Write the bar once, as a standard, and Tessra lands only what meets it. You review the standard and the exceptions, not every diff.
 
@@ -89,7 +89,7 @@ The installer puts `tessra` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Win
 tessra --version
 ```
 
-Git is optional. Tessra runs the `git` command only to import an existing checkout at `init` and for the git bridge. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
+Git is optional. Tessra runs the `git` command only to import an existing checkout at `init`, for the git bridge, and to tell the owner's `status` what the bridge is waiting on. Every [release](https://github.com/NitrusAphalion/tessra/releases) also carries archives for x86_64 and arm64, checksums, and a source tarball. To build from source instead, see [Developing](#developing).
 
 Tessra is developed and tested on Windows 11. The macOS and Linux builds come from the same pipeline and have not been exercised there yet, so if something breaks, an [issue](https://github.com/NitrusAphalion/tessra/issues/new?template=bug_report.md) with the failing command is the most useful thing you can file.
 
@@ -113,18 +113,18 @@ tessra remember --kind gotcha --body "the build needs GOFLAGS=-mod=mod" --scope-
 
 ### 4. Make a change and land it
 
-Every author works in a workspace of its own and lands through the standard. Run the loop once yourself, as an agent named `bot`:
+Every author works in a workspace and lands through the standard. Run the loop once yourself, as an agent named `bot`:
 
 ```sh
-tessra --agent bot workspace --action create                   # prints a workspace id
-tessra --agent bot --workspace <id> edit --path src/x.rs --content "..."
-tessra --agent bot --workspace <id> snapshot --title "handle the empty case" --then verify
-tessra --agent bot --workspace <id> promote --to proposed
+tessra --agent bot workspace --action adopt                    # this checkout is bot's workspace now
+tessra --agent bot edit --path src/x.rs --content "..."        # or edit with any tool you like
+tessra --agent bot snapshot --title "handle the empty case" --then verify
+tessra --agent bot promote --to proposed
 tessra promote --to landed --all              # as the owner: land everything that meets the standard
 tessra export --format git --branch main      # landed revisions become ordinary git commits
 ```
 
-`verify` runs your tests in a scratch copy and reports the standard clause by clause. When a clause is unmet, `promote` names it and says what would satisfy it.
+`adopt` takes the directory you were started in, so the files your editor and your tests see are the ones Tessra snapshots. `workspace --action create` makes a separate directory instead, which is what each agent of a swarm gets. `verify` runs your tests in a scratch copy and reports the standard clause by clause. When a clause is unmet, `promote` names it and says what would satisfy it.
 
 ### 5. Connect an agent
 
@@ -140,25 +140,35 @@ tessra export --format git --branch main      # landed revisions become ordinary
 
 The session acts as agent `claude`, proposes changes, and you land them. Any MCP client connects the same way. [How agents use it](#how-agents-use-it) describes the loop a session follows.
 
+Two more things keep a session on Tessra's loop instead of git's in a checkout that has both. `tessra export --format claude-md` writes a `CLAUDE.md` that opens with the rule, that the repository is under Tessra and `.git/` is the owner's bridge, and continues with shared memory; Claude Code reads it before anything else, so run it again when memory changes (`--format agents-md` writes the same as `AGENTS.md`). And `.claude/settings.json` can refuse the git commands outright, which no manual can:
+
+```json
+{ "permissions": { "deny": [
+  "Bash(git add *)", "Bash(git commit *)", "Bash(git push *)", "Bash(git checkout *)", "Bash(git switch *)",
+  "Bash(git stash *)", "Bash(git rebase *)", "Bash(git merge *)", "Bash(git reset *)", "Bash(git cherry-pick *)"
+] } }
+```
+
 ## Working alongside git
 
-Tessra never writes to `.git/` on its own. Landed revisions become commits when you export, and commits your teammates push become landed revisions when you import. Neither direction rewrites anything: an exported commit carries `Tessra-Change` and `Tessra-Revision` trailers, an imported commit's revision remembers its hash, and a second export of the same trunk creates nothing.
+Tessra never writes to `.git/` on its own. Landed revisions become commits when trunk is exported, and commits your teammates push become landed revisions when you import. Neither direction rewrites anything: an exported commit carries `Tessra-Change` and `Tessra-Revision` trailers, an imported commit's revision remembers its hash, and a second export of the same trunk creates nothing.
 
 ```sh
 tessra promote --to landed --all                         # land what the agents proposed
 tessra export --format git --branch main                 # one commit per landing, authored by the agent that made it
 tessra export --format git --branch main --push origin   # the same, then push the branch
+tessra config --set git.export=main --set git.push=origin   # or export and push after every landing, without asking
 
 git pull                                                 # teammates' commits arrive with git, as always
 tessra import --branch main                              # each new commit lands on trunk as a change of its own
 tessra import --branch main --history                    # the same, as history: outside the standard, no verifiers, no hooks
 ```
 
-That is the whole rhythm: land, export, push; pull, import. The daemon does not watch `.git/refs` yet, so run `import` yourself after a pull.
+That is the whole rhythm: land, export, push; pull, import. The owner's `status` reports `git` with what each side is waiting on, landings not yet exported and commits not yet imported, and names the command that moves them. Agents never run git: their `promote` is the commit, and the export writes it in their name.
 
 What to expect:
 
-- Export writes commits on top of the newest exported or imported one, in trunk order, and moves the branch ref. A clean checkout of that branch is reset to the new tip; a dirty one is left alone, and the response says so.
+- Export writes commits on top of the newest exported or imported one, in trunk order, and moves the branch ref. A checkout of that branch is fast-forwarded when it is clean. When it already holds the exported content, which is the case when the landed change was made in it, HEAD and the index move to the new tip without a file being touched. Otherwise it is left alone, and the response says so.
 - Export is linear. A landing that merged concurrent changes becomes one commit, not a git merge. Import is first-parent, and a commit that conflicts with trunk stops the import at that commit.
 - Import lands each commit through the standard, so a commit whose tests fail, or that edits a test nobody approved, stops the import too. `--history` lands the commits as history instead, the way `init` lands the commits it imports: outside the standard, with no verifiers and no hooks, and it takes the owner credential. Use it for history that already exists and was checked elsewhere, not for a commit that is really a proposal.
 - `.tessra/` shows up as untracked until you add it to `.gitignore`. Nothing else in the tree changes.
@@ -199,7 +209,7 @@ Tree-sitter splits a file into units with identities that survive edits, moves, 
 | **Humans by exception** | Approvals, judged exceptions, and questions reach people through channels the daemon owns, and a reply is a key-signed attestation the agent never touched. Ask what happened in the last hour at the altitude you want. |
 | **A risk monitor** | Every change carries a score with its factors and what would lower each. Agents that write outside their claims or scope are throttled, then revoked, and their unlanded work is unwound in one op. |
 | **Intent to production** | Targets, releases, canary slices, observers, and automatic rollback when an observed signal trips the target's standard. Tessra is the control plane; your deployer runs the containers. |
-| **The git bridge** | `export --format git` turns landed trunk revisions into a clean linear history, one commit per landing authored by its agent. `import --branch` lands the commits your teammates made with git. |
+| **The git bridge** | `export --format git` turns landed trunk revisions into a clean linear history, one commit per landing authored by its agent, on demand or after every landing. `import --branch` lands the commits your teammates made with git. Agents never run git. |
 | **State that travels** | A snapshot can carry the toolchain, lockfile hashes, and build state as trees, so checking out an earlier revision runs with no install step. |
 | **Signed by default** | Every principal has a key; every op is signed, chained, and checked against a capability the verifier walks back to the owner. History is tamper-evident. |
 
@@ -209,7 +219,7 @@ Every session follows one loop, and the repository remembers everything between 
 
 1. **`status`** first: your assignment, claims, open questions, your change's standard status, and what changed since you last looked.
 2. **`context`** for what you are about to touch, within a token budget.
-3. **`workspace`** if you do not have one. It is yours alone.
+3. **`workspace`** if you do not have one: adopt the checkout you were started in, or create one of your own. Either is yours alone.
 4. **`edit`**, then **`snapshot`**. Snapshot never blocks and never publishes; problems come back as flags.
 5. **`verify`** before claiming anything. It returns the standard clause by clause, with what would satisfy each unmet one.
 6. **`promote`** to land. If the standard is unmet, the response says exactly which clauses and how to fix them.
@@ -231,9 +241,9 @@ Every response has the same shape, so an agent reads state instead of inferring 
 }
 ```
 
-Errors carry a `code`, the `unmet` clauses, and a `fix` you can run. Every mutation takes an idempotency key, so a retry never happens twice, and `undo` takes back your own recent operations.
+Errors carry a `code`, the `unmet` clauses, and a `fix` you can run. Every mutation takes an idempotency key, so a retry never happens twice, and `undo` takes back your own recent operations. In a git checkout the agent never runs git: `promote` is its commit, and the owner's export writes that commit in the agent's name.
 
-The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](docs/VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, in about a thousand tokens.
+The thirteen verbs are `status`, `context`, `query`, `workspace`, `edit`, `snapshot`, `claim`, `remember`, `verify`, `try`, `promote`, `revert`, and `undo`. Administrative verbs such as `standard`, `hook`, `grant`, `target`, and `release` are owner-gated. [VERBS.md](docs/VERBS.md) explains each name; [spec/06-manual.md](spec/06-manual.md) is the whole manual for an agent, under 2,000 characters, because that is about how much of an MCP server's instructions Claude Code passes through, and each tool's description carries the rules for that verb.
 
 ## Standards and hooks
 

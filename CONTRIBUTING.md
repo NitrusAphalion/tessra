@@ -16,20 +16,23 @@ A session working a bug:
 
 1. lists what is open with `gh issue list --repo NitrusAphalion/tessra --label bug` and triages, most reproducible first;
 2. reproduces it in a scratch repository, and writes a failing test wherever one fits;
-3. fixes it through the Tessra loop, so `verify` runs the suite, and puts `Fixes #N` in the change's title, which becomes the commit that closes the issue;
+3. fixes it through the Tessra loop, so `verify` runs the suite, and puts `Fixes #N` in the change's title, which becomes the commit that closes the issue when trunk is exported;
 4. comments on anything it cannot reproduce with what it tried, and leaves it open.
 
 ## Changes
 
-1. Fork and branch. `main` is protected: changes land through a pull request, and every commit must carry a verified signature, so set up [commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) before you start.
-2. Format with `cargo fmt --all`, then build and test with `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`; the repository's standard refuses to land a change with a clippy warning or an unformatted file. [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb, and the daemon.
+In a checkout under Tessra, which is how the maintainers and their agent sessions work, a change never touches git:
+
+1. `tessra --agent <you> workspace --action adopt`, edit with any tool, `snapshot --then verify`, then `promote --to proposed`. The owner lands it and exports trunk to `main`, and the commit carries your name. A `git commit` in this checkout goes around the standard, and `.claude/settings.json` refuses it to agent sessions.
+2. Format with `cargo fmt --all` before you snapshot. The standard refuses a change with a failing test, a clippy warning, or an unformatted file, and `verify` says which; `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` are what it runs. [DEVELOPING.md](DEVELOPING.md) covers the toolchain, the crate layout, every verb, and the daemon.
 3. Keep the spec honest. When a design document and [spec/](spec/README.md) disagree, the spec wins and the document gets fixed, so a change in behavior comes with the matching change in the spec or its deviations list.
 4. Note user-visible changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). The release pipeline uses that section for the release notes.
-5. Open the pull request. Say what changed, why, and how you verified it.
+
+From a fork, without the maintainers' daemon, the path is git's: branch, sign your commits (`main` requires verified signatures, so set up [commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) first), and open a pull request that says what changed, why, and how you verified it. What merges is imported into the store as history.
 
 ## Agent sessions
 
-Sessions of Claude Code and other agents contribute here too, under the same rules. The repository is developed under Tessra itself; `tessra status` in a checkout shows the standard a change has to meet.
+Sessions of Claude Code and other agents contribute here too, under the same rules, and through the loop above rather than git. The repository is developed under Tessra itself; `tessra status` in a checkout shows the standard a change has to meet.
 
 ## Releases
 

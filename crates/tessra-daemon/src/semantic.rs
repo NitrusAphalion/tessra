@@ -37,6 +37,18 @@ pub fn build_nodes(
     flat: &Flat,
     parent: Option<(&Flat, &NodeIndex)>,
 ) -> Result<Vec<Node>> {
+    build_nodes_with(store, flat, parent, false)
+}
+
+/// `build_nodes`, and with `refresh` every file is extracted again even
+/// when unchanged from the parent, matched against the parent's nodes so
+/// identities are kept: what an index built by an older extractor needs.
+fn build_nodes_with(
+    store: &RedbStore,
+    flat: &Flat,
+    parent: Option<(&Flat, &NodeIndex)>,
+    refresh: bool,
+) -> Result<Vec<Node>> {
     let mut parent_by_path: HashMap<&str, Vec<&Node>> = HashMap::new();
     if let Some((_, idx)) = parent {
         for n in &idx.nodes {
@@ -55,7 +67,7 @@ pub fn build_nodes(
             continue;
         }
         let Some(blob) = leaf.r#ref else { continue };
-        if let Some((pflat, _)) = parent {
+        if let (Some((pflat, _)), false) = (parent, refresh) {
             if pflat.get(path).and_then(|l| l.r#ref) == Some(blob) {
                 if let Some(nodes) = parent_by_path.get(path.as_str()) {
                     out.extend(nodes.iter().map(|n| (*n).clone()));
@@ -481,20 +493,73 @@ pub fn index_for_revision(store: &RedbStore, rev: &Revision) -> Result<(ObjectId
     index_for_snapshot(store, &snap_id)
 }
 
-/// The index a snapshot references, or the one cached for it.
+/// Whether an index was built by the current extractor and body hash. One
+/// with an older stamp carries, for every file unchanged since it was
+/// built, hashes the current code would not produce; diffed against, it
+/// calls every unit of any file touched since changed.
+fn current(idx: &NodeIndex) -> bool {
+    idx.grammars == GRAMMARS
+}
+
+/// The index a snapshot references, or the one cached for it. A refreshed
+/// index cached under the snapshot's key wins over the one the snapshot
+/// names, and an index with an older stamp is refreshed in place first.
 fn cached_index(store: &RedbStore, snap_id: &ObjectId) -> Result<Option<(ObjectId, NodeIndex)>> {
     let snap: Snapshot = store.get(snap_id)?;
-    if let Some(id) = snap.index {
-        return Ok(Some((id, store.get(&id)?)));
-    }
-    if let Some(bytes) = store.meta(&format!("idx:{}", snap_id.to_hex()))? {
+    let key = format!("idx:{}", snap_id.to_hex());
+    let mut meta_id: Option<ObjectId> = None;
+    let mut found: Option<(ObjectId, NodeIndex)> = None;
+    if let Some(bytes) = store.meta(&key)? {
         if let Ok(id) = ObjectId::from_slice(&bytes) {
             if let Ok(idx) = store.get::<NodeIndex>(&id) {
-                return Ok(Some((id, idx)));
+                meta_id = Some(id);
+                found = Some((id, idx));
             }
         }
     }
-    Ok(None)
+    if !found.as_ref().is_some_and(|(_, i)| current(i)) {
+        if let Some(id) = snap.index {
+            let idx: NodeIndex = store.get(&id)?;
+            if current(&idx) || found.is_none() {
+                found = Some((id, idx));
+            }
+        }
+    }
+    let chosen = match found {
+        Some((id, idx)) if current(&idx) => (id, idx),
+        Some((_, stale)) => refresh_index(store, snap_id, &snap, &stale)?,
+        None => return Ok(None),
+    };
+    // The cache key names what the daemon uses, so everything that reads
+    // the key instead of asking, such as the standard's evaluation, agrees.
+    if meta_id != Some(chosen.0) {
+        store.set_meta(&key, &chosen.0 .0)?;
+    }
+    Ok(Some(chosen))
+}
+
+/// Extract every file of a snapshot again with the current extractor,
+/// matched against the stale index's nodes so each unit keeps its
+/// identity, and cache the result in the stale one's place.
+fn refresh_index(
+    store: &RedbStore,
+    snap_id: &ObjectId,
+    snap: &Snapshot,
+    stale: &NodeIndex,
+) -> Result<(ObjectId, NodeIndex)> {
+    let flat = tree::flatten(store, &snap.root)?;
+    store.begin_batch();
+    let nodes = build_nodes_with(store, &flat, Some((&flat, stale)), true)?;
+    let id = put_index_with_aliases(
+        store,
+        snap.root,
+        stale.parents.clone(),
+        nodes,
+        stale.aliases.clone(),
+    )?;
+    store.end_batch()?;
+    store.set_meta(&format!("idx:{}", snap_id.to_hex()), &id.0)?;
+    Ok((id, store.get(&id)?))
 }
 
 /// Compute a snapshot's index, against the index of `parent_snap` when

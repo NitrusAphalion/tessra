@@ -167,7 +167,7 @@ fn envelope(state: Json, outcome: Result<Outcome>, limit: u64) -> Json {
 
 fn fix_for(code: &str) -> Option<String> {
     match code {
-        "NO_WORKSPACE" => Some("workspace --action create".into()),
+        "NO_WORKSPACE" => Some("workspace --action adopt".into()),
         "STANDARD_UNMET" => Some("verify".into()),
         "CREDENTIAL_REQUIRED" => Some("the same call with --credential".into()),
         "NOT_YET" => None,
@@ -261,13 +261,45 @@ fn actor_workspace(repo: &Repo, actor: &Actor) -> Option<Workspace> {
             if actor.kind == "daemon" {
                 repo.root_workspace().cloned()
             } else {
-                repo.workspaces
-                    .iter()
-                    .find(|w| w.principal == actor.principal())
+                // The checkout this agent adopted comes first, across its
+                // sessions; then a workspace of its own.
+                repo.root_workspace()
+                    .filter(|w| w.holder.is_some() && w.holder == Some(holder_id(repo, actor)))
                     .cloned()
+                    .or_else(|| {
+                        repo.workspaces
+                            .iter()
+                            .find(|w| w.principal == actor.principal())
+                            .cloned()
+                    })
             }
         }
     }
+}
+
+/// Who holds an adopted checkout: the agent behind a session, so every
+/// session of that agent finds it again; otherwise the principal itself.
+fn holder_id(repo: &Repo, actor: &Actor) -> EntityId {
+    repo.session_agent(&actor.principal())
+        .unwrap_or_else(|| actor.principal())
+}
+
+/// The owner's edits, snapshots, and rewinds of the checkout wait while an
+/// agent holds it; landing what the agent snapshotted there does not.
+fn refuse_if_held(repo: &Repo, actor: &Actor, ws: &Workspace) -> Result<()> {
+    if actor.kind != "daemon" {
+        return Ok(());
+    }
+    if let Some(h) = ws.holder {
+        let who = repo.principal_name(&h).unwrap_or_else(|| h.to_letters());
+        return Err(Error::verb(
+            "HELD",
+            format!(
+                "the checkout is held by {who}: `workspace --action release` takes it back, or act as them with --agent {who}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A workspace is materialized into a directory of its own: what the tree
@@ -318,8 +350,12 @@ fn refuse_unless_fresh(repo: &Repo, path: &std::path::Path) -> Result<()> {
 }
 
 fn require_workspace(repo: &Repo, actor: &Actor) -> Result<Workspace> {
-    actor_workspace(repo, actor)
-        .ok_or_else(|| Error::verb("NO_WORKSPACE", "you have no workspace yet"))
+    actor_workspace(repo, actor).ok_or_else(|| {
+        Error::verb(
+            "NO_WORKSPACE",
+            "you have no workspace yet: `workspace --action adopt` takes the checkout you were started in if nobody holds it, `workspace --action create` makes one of your own",
+        )
+    })
 }
 
 fn ws_path(ws: &Workspace) -> PathBuf {
@@ -432,6 +468,14 @@ fn standard_status(
         Some(s) => Some(crate::semantic::index_for_snapshot(repo.store(), s)?.1),
         None => None,
     };
+    // The parent's index too, so one an older extractor built is refreshed
+    // before the standard diffs the revision against it.
+    if let Some(p) = rev.parents.first() {
+        let pr: Revision = repo.store().get(p)?;
+        if let Some(s) = pr.snapshots.get("") {
+            crate::semantic::index_for_snapshot(repo.store(), s)?;
+        }
+    }
     let attests = crate::verifiers::collect_for(repo, rev_id, rev, idx.as_ref())?;
     let unmet = standard::evaluate(repo.store(), &vs, &view, &std_id, rev_id, rev, &attests)?;
     let total = standard::chain(repo.store(), &vs, &view, &std_id)?
@@ -930,10 +974,33 @@ fn status(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 result["assignment"] = json!({ "intent": a.intent.to_letters(), "title": a.title, "units": a.units, "paths": a.paths, "ops_budget": a.ops });
             }
         }
-        return ok(
-            result,
-            &["context --path <what you will touch>", "snapshot"],
-        );
+        let mut next: Vec<String> = vec![
+            "context --path <what you will touch>".into(),
+            "snapshot".into(),
+        ];
+        if actor.kind == "daemon" {
+            // The owner's checkout: who holds it, and what the git bridge is
+            // waiting on, with the command that moves it.
+            if let Some(h) = ws.holder {
+                result["held_by"] =
+                    json!(repo.principal_name(&h).unwrap_or_else(|| h.to_letters()));
+            }
+            let branch = match repo.config().get("git.export") {
+                Some(Cbor::Text(b)) if !b.is_empty() => b.clone(),
+                _ => "main".to_string(),
+            };
+            if let Ok(Some(git)) = crate::bridge::drift(repo, &branch) {
+                if git["unimported"].as_u64().unwrap_or(0) > 0 {
+                    next.insert(0, format!("import --branch {branch}"));
+                }
+                if git["unexported"].as_u64().unwrap_or(0) > 0 {
+                    next.insert(0, format!("export --format git --branch {branch}"));
+                }
+                result["git"] = git;
+            }
+        }
+        let next_refs: Vec<&str> = next.iter().map(String::as_str).collect();
+        return ok(result, &next_refs);
     }
     if let Some(agent) = repo.session_agent(&actor.principal()) {
         if let Some(a) = crate::swarm::load_assignment(repo, &agent) {
@@ -941,6 +1008,22 @@ fn status(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
             return ok(
                 result,
                 &["workspace --action create", "claim --paths <your paths>"],
+            );
+        }
+    }
+    // No workspace yet. The checkout this session was started in is the
+    // one its other tools already see; adopting it comes first when nobody
+    // holds it.
+    if let Some(root) = repo.root_workspace() {
+        let held_by = root
+            .holder
+            .map(|h| repo.principal_name(&h).unwrap_or_else(|| h.to_letters()));
+        let free = held_by.is_none();
+        result["checkout"] = json!({ "path": display_path(&ws_path(root)), "held_by": held_by });
+        if free {
+            return ok(
+                result,
+                &["workspace --action adopt", "workspace --action create"],
             );
         }
     }
@@ -1988,6 +2071,7 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
                 env: None,
                 created: now(),
                 expires: None,
+                holder: None,
             };
             repo.save_workspace(&ws)?;
             repo.workspaces.push(ws);
@@ -2002,6 +2086,7 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             // path the revision's snapshot carried, so an experiment rewinds
             // together with everything it wrote outside the source tree.
             let ws = require_workspace(repo, actor)?;
+            refuse_if_held(repo, actor, &ws)?;
             let to = arg_str(args, "to").unwrap_or("trunk");
             let target = if to == "trunk" {
                 trunk_head(repo)?.0
@@ -2074,15 +2159,107 @@ fn workspace(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome>
             }
             ok(json!({ "dropped": id.to_letters() }), &[])
         }
+        "adopt" => {
+            // The colocated checkout is the directory an agent was started
+            // in, and the one its other tools already read and write. One
+            // principal holds it at a time; the owner's own edits wait until
+            // it is released, and landing what was snapshotted there does
+            // not.
+            if actor.kind == "daemon" {
+                return Err(Error::verb(
+                    "ARGS",
+                    "the checkout is already the owner's workspace; adopt is for an agent session",
+                ));
+            }
+            let Some(ws) = repo.root_workspace().cloned() else {
+                return Err(Error::verb(
+                    "NOT_FOUND",
+                    "this repository has no checkout workspace",
+                ));
+            };
+            let me = holder_id(repo, actor);
+            if let Some(h) = ws.holder.filter(|h| *h != me) {
+                let who = repo.principal_name(&h).unwrap_or_else(|| h.to_letters());
+                return Err(Error::verb(
+                    "HELD",
+                    format!(
+                        "the checkout is held by {who}: `workspace --action create` makes one of your own, or the owner releases it"
+                    ),
+                ));
+            }
+            let (rev_id, rev) = current_revision(repo, &ws)?;
+            // Someone else's unlanded work in the checkout would become
+            // this agent's next revision.
+            let view = repo.log.current_view()?;
+            let landed = landed_revisions(repo.store(), &view)?;
+            let theirs = !landed.contains(&rev_id)
+                && rev.author != actor.principal()
+                && repo.session_agent(&rev.author) != Some(me);
+            if theirs {
+                let who = repo
+                    .principal_name(&rev.author)
+                    .unwrap_or_else(|| rev.author.to_letters());
+                return Err(Error::verb(
+                    "HELD",
+                    format!(
+                        "the checkout carries an unlanded change of {who}'s, \"{}\": it lands or rewinds first, or `workspace --action create` makes one of your own",
+                        rev.title
+                    ),
+                ));
+            }
+            if let Some(w) = repo.workspace_mut(&ws.id) {
+                w.holder = Some(me);
+                let w2 = w.clone();
+                repo.save_workspace(&w2)?;
+            }
+            actor.workspace = Some(ws.id);
+            ok(
+                json!({ "workspace": ws.id.to_letters(), "path": display_path(&ws_path(&ws)), "revision": rev_id.to_hex(), "title": rev.title, "adopted": true }),
+                &["context --path <what you will touch>", "snapshot"],
+            )
+        }
+        "release" => {
+            let Some(ws) = repo.root_workspace().cloned() else {
+                return Err(Error::verb(
+                    "NOT_FOUND",
+                    "this repository has no checkout workspace",
+                ));
+            };
+            let Some(h) = ws.holder else {
+                return ok(
+                    json!({ "workspace": ws.id.to_letters(), "released": false, "why": "nobody holds the checkout" }),
+                    &[],
+                );
+            };
+            if actor.kind != "daemon" && h != holder_id(repo, actor) {
+                return Err(Error::verb(
+                    "SCOPE",
+                    "the checkout is held by someone else; its holder or the owner releases it",
+                ));
+            }
+            if let Some(w) = repo.workspace_mut(&ws.id) {
+                w.holder = None;
+                let w2 = w.clone();
+                repo.save_workspace(&w2)?;
+            }
+            if actor.workspace == Some(ws.id) {
+                actor.workspace = None;
+            }
+            ok(
+                json!({ "workspace": ws.id.to_letters(), "released": true }),
+                &["status"],
+            )
+        }
         other => Err(Error::verb(
             "ARGS",
-            format!("workspace action {other}; use list, create, drop"),
+            format!("workspace action {other}; use list, create, adopt, release, rewind, drop"),
         )),
     }
 }
 
 fn edit(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let ws = require_workspace(repo, actor)?;
+    refuse_if_held(repo, actor, &ws)?;
     if let Some(from) = arg_str(args, "rename") {
         return edit_rename(repo, actor, &ws, from, args);
     }
@@ -2277,6 +2454,7 @@ fn edit_rename(
 
 fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let ws = require_workspace(repo, actor)?;
+    refuse_if_held(repo, actor, &ws)?;
     let (cur_id, cur) = current_revision(repo, &ws)?;
     let (_, cur_snap) = root_snapshot(repo, &cur)?;
     let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
@@ -3811,7 +3989,15 @@ fn promote(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
                 &["promote --to landed"],
             )
         }
-        "landed" => land_one(repo, actor, &ws, rev_id, &rev, args),
+        "landed" => {
+            let mut out = land_one(repo, actor, &ws, rev_id, &rev, args)?;
+            if out.result.get("stage").and_then(Json::as_str) == Some("landed") {
+                if let Some(export) = crate::bridge::export_after_landing(repo) {
+                    out.result["export"] = export;
+                }
+            }
+            Ok(out)
+        }
         other => Err(Error::verb(
             "ARGS",
             format!("promote to {other}; M1 supports proposed and landed"),
@@ -4379,6 +4565,7 @@ fn revert(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
         env: None,
         created: now(),
         expires: None,
+        holder: None,
     };
     repo.save_workspace(&ws)?;
     repo.workspaces.push(ws.clone());
@@ -4498,10 +4685,15 @@ fn land_all(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     } else {
         0.0
     };
+    let export = if landed_n > 0 {
+        crate::bridge::export_after_landing(repo)
+    } else {
+        None
+    };
     ok(
         json!({
             "landed": landed_n, "considered": results.len(), "elapsed_ms": elapsed_ms,
-            "landings_per_hour": per_hour.round(), "results": results,
+            "landings_per_hour": per_hour.round(), "results": results, "export": export,
         }),
         &["status"],
     )
@@ -6037,6 +6229,12 @@ fn export(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let mut out = String::new();
     out.push_str("# Agent notes\n\n");
     out.push_str("Generated by `tessra export` from shared memory. Do not edit; record with `tessra remember` and export again.\n\n");
+    out.push_str("## This repository is under Tessra\n\n");
+    out.push_str(
+        "Work through the `tessra` tools: `status` first, `context` for what you touch, `workspace --action adopt` to work in this checkout, then `snapshot`, `verify`, `promote`, and `remember` what you learn. \
+         `.git/` is the owner's bridge, not yours: do not `git add`, `commit`, `branch`, `checkout`, `stash`, `rebase`, or `push`. \
+         `promote` is the commit; the owner's `export` is the push, and the commit it writes is authored by you.\n\n",
+    );
     for (label, list) in &groups {
         out.push_str(&format!("## {label}\n\n"));
         for m in list {
@@ -7391,5 +7589,232 @@ mod tests {
         assert_eq!(out["ok"], json!(true), "{out}");
         let q = call(&mut repo, &mut owner, "query", &json!({ "kind": "memory" }));
         assert_eq!(q["result"]["memories"].as_array().unwrap().len(), 0, "{q}");
+    }
+
+    /// An agent started in the checkout adopts it: what it writes there
+    /// with any tool is what it snapshots, in its own name, and every
+    /// session of that agent finds the checkout again. One holder at a
+    /// time; the owner's own edits wait for a release, a landing does not.
+    #[test]
+    fn an_agent_adopts_the_checkout_and_the_owner_waits_until_it_is_released() {
+        let (dir, mut repo, mut owner) = scratch();
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        // Without a workspace, the free checkout is the first suggestion,
+        // and the refusal for acting without one says so too.
+        let out = call(&mut repo, &mut bot, "status", &json!({}));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["next"][0], json!("workspace --action adopt"), "{out}");
+        assert_eq!(out["result"]["checkout"]["held_by"], Json::Null, "{out}");
+        let out = call(&mut repo, &mut bot, "snapshot", &json!({ "title": "x" }));
+        assert_eq!(out["code"], json!("NO_WORKSPACE"), "{out}");
+        assert_eq!(out["fix"], json!("workspace --action adopt"), "{out}");
+        // Adopted: the checkout is bot's workspace, and a file written there
+        // by any tool is bot's change.
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "adopt" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["adopted"], json!(true), "{out}");
+        std::fs::write(dir.path().join("new.txt"), "hello\n").unwrap();
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "snapshot",
+            &json!({ "title": "bot's change" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let rev_id = ObjectId::from_hex(out["result"]["revision"].as_str().unwrap()).unwrap();
+        let rev: Revision = repo.store().get(&rev_id).unwrap();
+        assert_eq!(rev.author, bot.principal(), "the snapshot is bot's");
+        // Another session of the same agent finds it without being told.
+        let mut again = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        again.workspace = None;
+        let out = call(&mut repo, &mut again, "status", &json!({}));
+        assert_eq!(out["result"]["title"], json!("bot's change"), "{out}");
+        // Another agent cannot take it, and the owner's own edits wait.
+        let mut other = repo.open_session("other", None, vec!["**".into()]).unwrap();
+        let out = call(
+            &mut repo,
+            &mut other,
+            "workspace",
+            &json!({ "action": "adopt" }),
+        );
+        assert_eq!(out["code"], json!("HELD"), "{out}");
+        let out = call(&mut repo, &mut other, "status", &json!({}));
+        assert_eq!(out["result"]["checkout"]["held_by"], json!("bot"), "{out}");
+        assert_eq!(out["next"][0], json!("workspace --action create"), "{out}");
+        for (verb, args) in [
+            ("snapshot", json!({ "title": "mine" })),
+            ("edit", json!({ "path": "o.txt", "content": "o" })),
+            ("workspace", json!({ "action": "rewind", "to": "trunk" })),
+        ] {
+            let out = call(&mut repo, &mut owner, verb, &args);
+            assert_eq!(out["code"], json!("HELD"), "{verb}: {out}");
+        }
+        let out = call(&mut repo, &mut owner, "status", &json!({}));
+        assert_eq!(out["result"]["held_by"], json!("bot"), "{out}");
+        // Landing what bot snapshotted there needs no release.
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["stage"], json!("landed"), "{out}");
+        // Released, the checkout is the owner's again.
+        let out = call(
+            &mut repo,
+            &mut other,
+            "workspace",
+            &json!({ "action": "release" }),
+        );
+        assert_eq!(out["code"], json!("SCOPE"), "not other's to release: {out}");
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "release" }),
+        );
+        assert_eq!(out["result"]["released"], json!(true), "{out}");
+        std::fs::write(dir.path().join("own.txt"), "mine\n").unwrap();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "the owner's" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // Now the checkout carries the owner's unlanded change, which is
+        // not bot's to build on.
+        let out = call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "adopt" }),
+        );
+        assert_eq!(out["code"], json!("HELD"), "{out}");
+        assert!(
+            out["message"].as_str().unwrap().contains("unlanded"),
+            "{out}"
+        );
+    }
+
+    /// The memory file for tools that do not speak Tessra opens with the
+    /// rule for a git checkout, before any memory.
+    #[test]
+    fn the_exported_memory_file_opens_with_the_rule_for_a_git_checkout() {
+        let (dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "remember",
+            &json!({ "kind": "gotcha", "body": "the build needs FOO=1" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "export",
+            &json!({ "format": "claude-md" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["memories"], json!(1), "{out}");
+        let text = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        let rule = text.find("## This repository is under Tessra").unwrap();
+        assert!(text[rule..].contains("`promote` is the commit"), "{text}");
+        assert!(text[rule..].contains("do not `git add`"), "{text}");
+        let memory = text.find("the build needs FOO=1").unwrap();
+        assert!(rule < memory, "the rule comes first: {text}");
+    }
+
+    /// An index built before the extractor's stamp changed carries body
+    /// hashes the current code would not produce. It is refreshed in place
+    /// on first use with every identity kept, so a diff against it names
+    /// only what the change touched and an untouched test is never
+    /// "weakened".
+    #[test]
+    fn an_index_from_an_older_extractor_is_refreshed_and_names_only_real_changes() {
+        let (dir, mut repo, mut owner) = scratch();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "standard",
+            &json!({ "forbid": ["structural(test.weakened)"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let base =
+            "pub fn f() -> u32 {\n    1\n}\n\n#[test]\nfn t() {\n    assert_eq!(f(), 1);\n}\n";
+        std::fs::write(dir.path().join("lib.rs"), base).unwrap();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "base" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // Age an index: an older stamp, foreign body hashes that differ
+        // from one aged index to the next, as two extractors' would.
+        let age = |repo: &Repo, snap_id: &ObjectId, byte: u8| -> Vec<EntityId> {
+            let (_, mut idx) = crate::semantic::index_for_snapshot(repo.store(), snap_id).unwrap();
+            let nids: Vec<EntityId> = idx.nodes.iter().map(|n| n.nid).collect();
+            idx.grammars = "tessra-semantic/0 older".into();
+            for n in &mut idx.nodes {
+                n.body = ObjectId([byte; 32]);
+            }
+            let stale = repo.store().put(&idx).unwrap();
+            repo.store()
+                .set_meta(&format!("idx:{}", snap_id.to_hex()), &stale.0)
+                .unwrap();
+            nids
+        };
+        let (head, _) = trunk_head_of(&repo).unwrap();
+        let head_rev: Revision = repo.store().get(&head).unwrap();
+        let head_snap = head_rev.snapshots[""];
+        let nids = age(&repo, &head_snap, 7);
+        // First use refreshes it: the same identities, real bodies, the
+        // current stamp, and it stays refreshed.
+        let (fresh_id, fresh) =
+            crate::semantic::index_for_snapshot(repo.store(), &head_snap).unwrap();
+        assert_eq!(fresh.grammars, tessra_semantic::GRAMMARS);
+        assert_eq!(fresh.nodes.iter().map(|n| n.nid).collect::<Vec<_>>(), nids);
+        assert!(fresh.nodes.iter().all(|n| n.body != ObjectId([7; 32])));
+        let (again_id, _) = crate::semantic::index_for_snapshot(repo.store(), &head_snap).unwrap();
+        assert_eq!(again_id, fresh_id, "refreshed once, then cached");
+        // A change to one unit diffs as that unit alone.
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            base.replace("    1\n", "    2\n"),
+        )
+        .unwrap();
+        let out = call(&mut repo, &mut owner, "snapshot", &json!({ "title": "f" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let changed = |repo: &mut Repo, owner: &mut Actor| -> Vec<String> {
+            let out = call(
+                repo,
+                owner,
+                "query",
+                &json!({ "kind": "diff", "path": "lib.rs" }),
+            );
+            out["result"]["units"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{out}"))
+                .iter()
+                .filter(|u| u["change"] == "changed")
+                .map(|u| u["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(changed(&mut repo, &mut owner), vec!["f".to_string()]);
+        // The same when the change's own index is stale too, as it is for a
+        // snapshot indexed against a stale parent before the stamp moved.
+        let new_snap = ObjectId::from_hex(out["state"]["snapshot"].as_str().unwrap()).unwrap();
+        age(&repo, &new_snap, 8);
+        age(&repo, &head_snap, 9);
+        assert_eq!(changed(&mut repo, &mut owner), vec!["f".to_string()]);
+        // And the untouched test does not count as weakened: the landing
+        // the standard forbids for that goes through.
+        let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["stage"], json!("landed"), "{out}");
     }
 }

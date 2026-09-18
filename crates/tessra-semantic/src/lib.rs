@@ -90,9 +90,15 @@ impl Language {
     }
 }
 
-/// Identifier of the grammar set and matcher, recorded on every nodeindex.
+/// Identifier of the grammar set, extractor, and body hash, recorded on
+/// every nodeindex. Bump the leading version whenever what `extract` or
+/// `body_hash` produces for the same source changes: an index carrying an
+/// older stamp is refreshed in place before it is diffed against, since
+/// nodes carried over from unchanged files would otherwise hold hashes the
+/// current code never produces and every unit would read as changed.
+/// 2: attributes, doc comments, and Python indentation hash into the body.
 pub const GRAMMARS: &str =
-    "tessra-semantic/1 tree-sitter-0.27 rust-0.24 python-0.25 javascript-0.25 typescript-0.23";
+    "tessra-semantic/2 tree-sitter-0.27 rust-0.24 python-0.25 javascript-0.25 typescript-0.23";
 
 /// Extract the units of a file. Binary content yields no nodes. Files without
 /// a grammar yield chunk nodes at blank-line boundaries.

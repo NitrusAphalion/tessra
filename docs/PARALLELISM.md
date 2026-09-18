@@ -54,6 +54,21 @@ Trunk is a sequence of landings. Each landing merges a change onto the frontier 
 - Merge is proportional to nodes touched.
 - Materialization regenerates files from nodes on checkout.
 
+## Measured against git
+
+`crates/tessra-cli/tests/versus_git.rs` runs the same scenarios twice from one base file of twenty functions. In git, every agent is a branch off the base commit and an unattended integrator merges the branches into `main` oldest first, abandoning a merge that conflicts. In Tessra, every agent is a session with a workspace of its own, all of them working at once against the repository's daemon, and `promote --to landed --all` is the frontier. Both results are compiled with `rustc`. `cargo test -p tessra-cli --test versus_git -- --nocapture` prints the tally; this is it on Windows, in a debug build:
+
+| scenario | agents | git: landed / needs a person | Tessra: landed / conflict tasks | git result | Tessra result |
+|---|---|---|---|---|---|
+| each agent edits its own function | 20 | 20 / 0 | 20 / 0 | compiles | compiles |
+| each agent adds a function | 20 | 1 / 19 | 20 / 0 | compiles | compiles |
+| each agent adds an import | 20 | 1 / 19 | 20 / 0 | compiles | compiles |
+| one renames, another calls the old name | 2 | 2 / 0 | 2 / 0 | does not compile | compiles |
+| one reformats the file, another edits a function | 2 | 1 / 1 | 2 / 0 | compiles | compiles |
+| two edit the same function, a third edits another | 3 | 2 / 1 | 2 / 1 | compiles | compiles |
+
+The first row is the control: the edits are separated by unchanged lines, so git's line merge lands them too. Each row after it is one of the cases above. Additions at the end of the file and imports after the same line are set merges here and nineteen conflicts there. The rename is the quiet failure: git merges the rename and the new caller cleanly into a file that no longer compiles, while the recorded rename is carried into the caller and the landing says so. A reformat conflicts with every edit in git and loses only in the edited unit here. When two agents really do edit the same function, the frontier lands the first, opens a conflict task for the second with both sides in its workspace, and lands the bystander without waiting; git's integrator is left holding a half-done merge. On this machine the twenty-agent rows took about four seconds of wall clock through the daemon, with the agents' processes running concurrently, against five to nine for git's sequential branches and merges.
+
 ## The next level down
 
 Statement-level identity within a node, so two agents editing different branches of one function still merge without a conflict task. This is the same matching problem one level deeper. It is scheduled after node-level matching is solid, and the same fallback chain applies until then.

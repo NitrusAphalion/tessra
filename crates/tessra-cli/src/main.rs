@@ -117,9 +117,9 @@ enum Cmd {
         #[arg(long, default_value_t = 4000)]
         budget: u64,
     },
-    /// Create, list, or drop a workspace.
+    /// Adopt the checkout, or create, list, rewind, release, or drop a workspace.
     Workspace {
-        /// list, create, drop, or rewind (--to a revision: files and state paths back to that point).
+        /// adopt (the checkout you were started in, as your workspace), create, list, drop, release (the checkout you adopted), or rewind (--to a revision: files and state paths back to that point).
         #[arg(long, default_value = "list")]
         action: String,
         #[arg(long, default_value = "trunk")]
@@ -451,17 +451,24 @@ fn main() {
 
 fn run() -> i32 {
     let cli = Cli::parse();
-    // Code under test does not act on the repository it is being tested
-    // for: a verifier's environment carries this variable, and this is
-    // where it stops.
-    if std::env::var_os("TESSRA_SANDBOX").is_some() {
-        print(
-            &json!({ "ok": false, "code": "SANDBOX", "message": "tessra does not act from inside a verifier run; code under test cannot reach the repository" }),
-            cli.pretty,
-        );
-        return 2;
-    }
     let start = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+    // Code under test does not act on the repository it is being tested
+    // for: a verifier's environment names that repository in this
+    // variable, and a command aimed at it stops here. A test's own scratch
+    // repository, anywhere else, is fine.
+    if let Some(sandbox) = std::env::var_os("TESSRA_SANDBOX") {
+        let target = match &cli.cmd {
+            Cmd::Init { path, .. } => path.clone(),
+            _ => start.clone(),
+        };
+        if sandboxed(&sandbox, &target) {
+            print(
+                &json!({ "ok": false, "code": "SANDBOX", "message": "tessra does not act on the repository from inside its own verifier run; code under test cannot reach the repository it is being tested for" }),
+                cli.pretty,
+            );
+            return 2;
+        }
+    }
 
     if let Cmd::Init {
         path,
@@ -881,5 +888,55 @@ fn print(v: &Value, pretty: bool) {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
     } else {
         println!("{}", serde_json::to_string(v).unwrap_or_default());
+    }
+}
+
+/// Whether a command aimed at `target` is kept off the repository a
+/// verifier is running for. `sandbox` is that repository's root; a value
+/// that is not a directory comes from an older daemon and keeps its
+/// meaning, which was to refuse everything.
+fn sandboxed(sandbox: &std::ffi::OsStr, target: &std::path::Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(sandbox) else {
+        return true;
+    };
+    // The target itself, or the nearest ancestor that exists, decides
+    // whether the command lands inside the repository.
+    let mut probe = Some(target);
+    while let Some(p) = probe {
+        let p = if p.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            p
+        };
+        if let Ok(c) = std::fs::canonicalize(p) {
+            return c.starts_with(&root);
+        }
+        probe = p.parent();
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sandboxed;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn code_under_test_is_kept_off_its_repository_and_nothing_else() {
+        let repo = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let sandbox = repo.path().as_os_str();
+        // The repository, and anything inside it.
+        assert!(sandboxed(sandbox, repo.path()));
+        assert!(sandboxed(sandbox, &repo.path().join("crates").join("new")));
+        // A scratch repository of the test's own, existing or about to be
+        // created, is not the repository under test.
+        assert!(!sandboxed(sandbox, elsewhere.path()));
+        assert!(!sandboxed(
+            sandbox,
+            &elsewhere.path().join("fresh").join("repo")
+        ));
+        // An older daemon says only that a verifier is running.
+        assert!(sandboxed(OsStr::new("1"), elsewhere.path()));
     }
 }

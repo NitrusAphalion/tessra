@@ -233,6 +233,97 @@ fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> R
     Ok(tree_id)
 }
 
+/// Move HEAD and the index of a checkout to `tip` when its working tree
+/// already is the tip's tree, and report whether it was. On any difference
+/// HEAD and the index go back where they were, and no file is touched
+/// either way.
+fn checkout_holds(work: &Path, tip: &str) -> Result<bool> {
+    let before = git_out(work, &[], &["rev-parse", "HEAD"], None)?;
+    git_out(work, &[], &["reset", "--quiet", tip], None)?;
+    // Tracked files against the index, with the same normalization a
+    // commit would apply; untracked files are not the export's.
+    let same = git_out(work, &[], &["diff", "--quiet"], None).is_ok();
+    if !same {
+        git_out(work, &[], &["reset", "--quiet", &before], None)?;
+    }
+    Ok(same)
+}
+
+/// After a landing, when the owner asked for it in configuration: export
+/// trunk to the branch `git.export` names, and push it to `git.push`. A
+/// failure is reported, not raised; the landing stands.
+pub fn export_after_landing(repo: &mut Repo) -> Option<Json> {
+    let config = repo.config();
+    let branch = match config.get("git.export") {
+        Some(Cbor::Text(b)) if !b.is_empty() => b.clone(),
+        _ => return None,
+    };
+    if !repo.root.join(".git").exists() {
+        return Some(
+            json!({ "ok": false, "branch": branch, "error": "no .git beside the repository to export to" }),
+        );
+    }
+    let push = match config.get("git.push") {
+        Some(Cbor::Text(r)) if !r.is_empty() => Some(r.clone()),
+        _ => None,
+    };
+    Some(match export_git(repo, &branch, None, push.as_deref()) {
+        Ok(mut out) => {
+            out["ok"] = json!(true);
+            out
+        }
+        Err(e) => {
+            json!({ "ok": false, "branch": branch, "code": e.code(), "error": e.to_string() })
+        }
+    })
+}
+
+/// What the bridge is waiting on, for the owner's status: landed trunk
+/// revisions with no commit yet, and commits on the branch that trunk does
+/// not know. None without a checkout; `unimported` is null when git cannot
+/// answer, such as for a branch that does not exist.
+pub fn drift(repo: &Repo, branch: &str) -> Result<Option<Json>> {
+    if !repo.root.join(".git").exists() {
+        return Ok(None);
+    }
+    let mut known: Option<String> = None;
+    let mut unexported = 0usize;
+    for (id, r) in trunk_chain(repo)? {
+        match commit_of(repo, &id, &r)? {
+            Some(c) => {
+                known = Some(c);
+                unexported = 0;
+            }
+            None => unexported += 1,
+        }
+    }
+    let refname = format!("refs/heads/{branch}");
+    let unimported = git_out(
+        &repo.root,
+        &[],
+        &["rev-parse", "--verify", "--quiet", &refname],
+        None,
+    )
+    .ok()
+    .and_then(|tip| {
+        let range = match &known {
+            Some(k) => format!("{k}..{tip}"),
+            None => tip,
+        };
+        git_out(
+            &repo.root,
+            &[],
+            &["rev-list", "--count", "--first-parent", &range],
+            None,
+        )
+        .ok()
+        .and_then(|n| n.trim().parse::<u64>().ok())
+    });
+    Ok(Some(
+        json!({ "branch": branch, "unexported": unexported, "unimported": unimported }),
+    ))
+}
+
 /// Export trunk to a branch: every landed revision that has no commit yet
 /// becomes one commit on top of the newest revision that has, authored by
 /// the change's author, in trunk order. Nothing already exported or
@@ -322,13 +413,19 @@ pub fn export_git(
         // ref must never move alone under a checkout: an index left behind
         // HEAD reads as staged deletions of the files the export added.
         if let Err(e) = git_out(&work, &[], &["merge", "--ff-only", "--quiet", &tip], None) {
-            return Err(Error::verb(
-                "EXPORT",
-                format!(
-                    "the checkout of {branch} did not fast-forward to the export, so the branch was not moved: {e}. \
-                     Commit or stash local changes that overlap the exported files, or run `import --branch {branch}` first if the branch has commits trunk does not know; then export again, or export to another branch"
-                ),
-            ));
+            // The checkout already holds the exported content when the landed
+            // change was made in it: the working tree is the tip's tree, and
+            // only HEAD and the index are behind. Move those two and touch no
+            // file; if the tree then differs from the index, put them back.
+            if !checkout_holds(&work, &tip)? {
+                return Err(Error::verb(
+                    "EXPORT",
+                    format!(
+                        "the checkout of {branch} did not fast-forward to the export, so the branch was not moved: {e}. \
+                         Land or stash local changes that overlap the exported files, or run `import --branch {branch}` first if the branch has commits trunk does not know; then export again, or export to another branch"
+                    ),
+                ));
+            }
         }
         "updated"
     };
@@ -511,6 +608,7 @@ pub fn import_git(repo: &mut Repo, actor: &mut Actor, branch: &str, history: boo
             env: None,
             created: now(),
             expires: None,
+            holder: None,
         };
         repo.save_workspace(&ws)?;
         repo.workspaces.push(ws.clone());
@@ -804,6 +902,7 @@ mod tests {
             env: None,
             created: now(),
             expires: None,
+            holder: None,
         };
         repo.save_workspace(&ws).unwrap();
         repo.workspaces.push(ws);
@@ -951,5 +1050,117 @@ mod tests {
         assert_eq!(out["checkout"], json!("updated"), "{out}");
         let a = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
         assert_eq!(a.replace("\r\n", "\n"), "one\nlanded\n");
+    }
+
+    /// A change made in the checkout itself, by an agent that adopted it,
+    /// is exported without a file being touched: the working tree already
+    /// is the tip's tree, so HEAD and the index catch up to it. With
+    /// `git.export` configured the landing runs the export, and the owner's
+    /// status says what the bridge is waiting on before and after.
+    #[test]
+    fn a_landing_made_in_the_checkout_exports_and_leaves_the_tree_alone() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let mut owner = repo.owner_actor();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner,
+            "config",
+            &json!({ "set": ["git.export=main"] }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let mut bot = repo.open_session("bot", None, vec!["**".into()]).unwrap();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut bot,
+            "workspace",
+            &json!({ "action": "adopt" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "new\n").unwrap();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut bot,
+            "snapshot",
+            &json!({ "title": "two files" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // Nothing landed yet, nothing to import: the bridge is idle.
+        let status = crate::verbs::call(&mut repo, &mut owner, "status", &json!({}));
+        assert_eq!(status["result"]["git"]["branch"], json!("main"), "{status}");
+        assert_eq!(status["result"]["git"]["unexported"], json!(0), "{status}");
+        assert_eq!(status["result"]["git"]["unimported"], json!(0), "{status}");
+        // The landing exports one commit in bot's name. A fast-forward is
+        // refused, since a.txt is modified and b.txt untracked, and the
+        // checkout is moved anyway because it already holds the tip.
+        let out = crate::verbs::call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["stage"], json!("landed"), "{out}");
+        let export = &out["result"]["export"];
+        assert_eq!(export["ok"], json!(true), "{out}");
+        assert_eq!(export["created"], json!(1), "{out}");
+        assert_eq!(export["checkout"], json!("updated"), "{out}");
+        assert_eq!(export["commits"][0]["author"], json!("bot"), "{out}");
+        // The landing had already pointed the checkout's workspace at the
+        // landed revision, which is what HEAD's commit now maps to.
+        assert_eq!(export["workspace"]["workspace"], json!("at HEAD"), "{out}");
+        let head = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        assert_eq!(export["tip"], json!(head), "{out}");
+        assert!(
+            git_out(dir.path(), &[], &["diff", "--quiet"], None).is_ok()
+                && git_out(dir.path(), &[], &["diff", "--cached", "--quiet"], None).is_ok(),
+            "the checkout is clean after the export"
+        );
+        let b = std::fs::read_to_string(dir.path().join("b.txt")).unwrap();
+        assert_eq!(b, "new\n", "no file was touched");
+        let (trunk, _) = crate::verbs::trunk_head_of(&repo).unwrap();
+        let status = crate::verbs::call(&mut repo, &mut owner, "status", &json!({}));
+        assert_eq!(status["result"]["git"]["unexported"], json!(0), "{status}");
+        assert_eq!(
+            status["state"]["revision"],
+            json!(trunk.to_hex()),
+            "{status}"
+        );
+        // A second export creates nothing; nothing is left to do.
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(0), "{out}");
+        // A commit made with git is a pending import, and status says how.
+        std::fs::write(dir.path().join("c.txt"), "three\n").unwrap();
+        git(dir.path(), &["add", "c.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "three"]);
+        let status = crate::verbs::call(&mut repo, &mut owner, "status", &json!({}));
+        assert_eq!(status["result"]["git"]["unimported"], json!(1), "{status}");
+        assert_eq!(status["next"][0], json!("import --branch main"), "{status}");
+        // A checkout whose tree really differs is left alone, with HEAD
+        // and the index where they were.
+        let mut owner_ws = repo.daemon_actor();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner_ws,
+            "import",
+            &json!({ "branch": "main" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        std::fs::write(dir.path().join("d.txt"), "landed elsewhere\n").unwrap();
+        let out = crate::verbs::call(&mut repo, &mut bot, "snapshot", &json!({ "title": "d" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = crate::verbs::call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["result"]["export"]["ok"], json!(true), "{out}");
+        std::fs::write(dir.path().join("d.txt"), "edited since\n").unwrap();
+        let before = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        std::fs::write(dir.path().join("e.txt"), "e\n").unwrap();
+        let out = crate::verbs::call(&mut repo, &mut bot, "snapshot", &json!({ "title": "e" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        std::fs::write(dir.path().join("e.txt"), "e, edited since\n").unwrap();
+        let out = crate::verbs::call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let export = &out["result"]["export"];
+        assert_eq!(export["ok"], json!(false), "{out}");
+        assert_eq!(export["code"], json!("EXPORT"), "{out}");
+        let after = git_out(dir.path(), &[], &["rev-parse", "HEAD"], None).unwrap();
+        assert_eq!(after, before, "HEAD did not move under a tree that differs");
+        let e = std::fs::read_to_string(dir.path().join("e.txt")).unwrap();
+        assert_eq!(e, "e, edited since\n", "and no file was touched");
     }
 }

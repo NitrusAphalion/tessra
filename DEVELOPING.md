@@ -47,6 +47,7 @@ Two consequences of this arrangement, neither of which applies on MSVC:
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --all
+cargo test -p tessra-cli --test versus_git -- --nocapture   # the same multi-agent scenarios through git and through Tessra, as a table
 ```
 
 The spec wins over the code. A test that disagrees with `spec/` is a bug in one of them, and the spec is fixed first.
@@ -96,13 +97,13 @@ Judges are sessions of agents other than the author's, each attesting `judge.<ru
 
 Production: `tessra target --name prod --deployer 'run(<cmd>)' --observers 'run(<cmd>)' --canary 10 --secrets vault:local:DEPLOY_TOKEN` defines a target with its own release standard extending trunk's (`tessra standard --target prod --require 'observe(error_rate, max=50)'`); a `dir(<path>)` deployer copies the snapshot into `<path>/<slice>`, a `run` deployer gets `TESSRA_TARGET`, `TESSRA_SLICE`, `TESSRA_PERCENT`, `TESSRA_REVISION`, `TESSRA_SNAPSHOT_DIR`, `TESSRA_STEP`, and the secrets from `vault.<NAME>` configuration keys, in its environment only. `tessra release --name v1` cuts a signed release of the trunk head with a changelog and the attestations that apply. `tessra promote --to prod --slice canary` deploys the head to the canary slice under trunk's standard; `--slice all` requires the target's own clauses too. `tessra observe --target prod` runs the observers, records each signal as an `observe.<name>` attestation on the deployed revision, evaluates the target's standard, and when an observe clause trips rolls back to the previous deployment of another revision, opens a task, and tells every channel; `auto_revert=false` in configuration turns the rollback off. `tessra revert --target prod` rolls back on request. `tessra target` lists targets with what is deployed and the latest releases. Hooks see `released`, `deployed`, `observed`, `observed.fail`, and `target.rolled_back`, and a `notify(channel=..., text=...)` action delivers to a channel.
 
-The git bridge: `tessra export --format git --branch main [--push origin]` writes every landed trunk revision that is not yet a commit as one commit on top of the newest that is, authored by the change's author with `Tessra-Change` and `Tessra-Revision` trailers, updates the branch, resets a clean checkout of that branch to it, and pushes when asked; nothing already a commit is rewritten, and the mapping lives in store metadata and in imported revisions' bodies. `tessra import --branch main` lands every commit the branch gained since the last export or import, first-parent order, through the normal landing. Both move the checkout's own workspace to the revision HEAD now is, so the owner's `status` and next snapshot start from it; a checkout workspace holding an unlanded owner snapshot is left alone, and the result says so under `workspace`. The verifier and deployer commands see paths without Windows' verbatim prefix.
+The git bridge: `tessra export --format git --branch main [--push origin]` writes every landed trunk revision that is not yet a commit as one commit on top of the newest that is, authored by the change's author with `Tessra-Change` and `Tessra-Revision` trailers, updates the branch, resets a clean checkout of that branch to it, and pushes when asked; nothing already a commit is rewritten, and the mapping lives in store metadata and in imported revisions' bodies. `tessra import --branch main` lands every commit the branch gained since the last export or import, first-parent order, through the normal landing. Both move the checkout's own workspace to the revision HEAD now is, so the owner's `status` and next snapshot start from it; a checkout workspace holding an unlanded owner snapshot is left alone, and the result says so under `workspace`. A checkout of the branch that already holds the exported content, as it does when the landed change was made in it, has HEAD and the index moved to the tip without a file being touched. `tessra config --set git.export=main --set git.push=origin` runs the export, and the push, after every landing, and the landing's response carries the result under `export`. The owner's `status` reports `git`: the branch, `unexported` landings, and `unimported` commits, with the command that moves them under `next`. The verifier and deployer commands see paths without Windows' verbatim prefix.
 
 State bundles: `tessra snapshot --with-state` (or config `snapshot_state=true`) records an environment on the snapshot with the toolchain versions, the hashes of any lockfile, and one tree per state path (config `state_paths`, default `target,data,.venv,node_modules`), so build state and experiment output travel with the change. `tessra workspace --action create --from <revision> --with-state` restores those state paths beside the files, so a checkout runs with no install step. `tessra workspace --action rewind --to <revision>` puts your current workspace back at a revision, files and state together, so an experiment rewinds including everything it wrote outside the source tree. The landing carries the change's environment onto trunk. The `tessra` CLI runs its work on a 64 MiB thread because clap's derived command builder and the verb dispatch have large frames in a debug build.
 
 `tessra edit --rename old --to new` is the first semantic operation: it renames the identifier as a whole word in every tracked file with a grammar (or one `--path`) and records the op on the change. At landing, each side's renames, recorded or inferred from a unit keeping its identity under a new name, are applied to what the other side contributes, so a concurrent change that added a call to the old name lands calling the new one, in the same file or another. The landing result lists each such resolution under `semantic`. A rename and a body edit of the same unit compose; a unit renamed differently on both sides, or a unit added under a name the other side renamed something to, is a conflict.
 
-Git is optional at run time. `init` runs the `git` command only when a `.git` directory is present, to import the history, and the bridge verbs `export --format git` and `import --branch` run it; no other verb does, so a repository without git works end to end. Every command prints the response shape from VERBS.md. The store and keys live under the local application data directory, never in the repository.
+Git is optional at run time. `init` runs the `git` command only when a `.git` directory is present, to import the history, the bridge verbs `export --format git` and `import --branch` run it, and the owner's `status` runs it to report drift when `.git` is there; no other verb does, so a repository without git works end to end. Every command prints the response shape from VERBS.md. The store and keys live under the local application data directory, never in the repository.
 
 ## The daemon
 
@@ -140,25 +141,26 @@ The trunk standard therefore requires `attest(tests.pass)`, `attest(lint.clean)`
 tessra --as malon attest --kind approval.human --subject <revision> --result true   # asks for malon's credential
 ```
 
-`tessra grant --human malon` printed that credential once; a human granted before credentials existed gets one by being granted again. Approve first and land once: every refused landing for a weakened test charges the change's author anomaly points, and six points revoke the agent for good. That is how agent `claude` was lost on the first day, which is why a Claude Code session in this checkout acts as agent `claude-code` through `.mcp.json`. Any other agent or person follows the same loop:
+`tessra grant --human malon` printed that credential once; a human granted before credentials existed gets one by being granted again. Approve first and land once: every refused landing for a weakened test charges the change's author anomaly points, and six points revoke the agent for good. That is how agent `claude` was lost on the first day, which is why a Claude Code session in this checkout acts as agent `claude-code` through `.mcp.json`. Any other agent or person follows the same loop, in this checkout or in a directory of their own:
 
 ```sh
-tessra --agent <you> workspace --action create            # a directory of your own; the response names it
-# edit there with any tool
-tessra --agent <you> --workspace <id> snapshot --title "..." --then verify
-tessra --agent <you> --workspace <id> promote --to proposed
+tessra --agent <you> workspace --action adopt             # this checkout is your workspace; --action create for a directory of your own
+# edit here with any tool
+tessra --agent <you> snapshot --title "..." --then verify
+tessra --agent <you> promote --to proposed
 tessra promote --to landed --all                           # the owner lands what meets the standard
-tessra export --format git --branch main && git push       # landings become commits on main
+tessra export --format git --branch main --push origin     # landings become commits on main, in the author's name
+tessra config --set git.export=main --set git.push=origin  # or have every landing do that
 ```
 
-Record what you learn with `tessra remember`; `tessra context --path <file>` shows it to the next session. Testing a change to Tessra itself means running `target/debug/tessra --no-daemon` against a scratch repository, never against this repository's daemon.
+Nobody runs `git commit` in this checkout: a commit made with git goes around the standard, and the store learns of it only through `import`. `.claude/settings.json` refuses those commands to a Claude Code session outright; `git push` stays allowed for release tags. While an agent holds the checkout, the owner's own `edit`, `snapshot`, and `rewind` are refused with `HELD` until `tessra workspace --action release`; landing what the agent snapshotted there, and exporting it, are not. Record what you learn with `tessra remember`; `tessra context --path <file>` shows it to the next session. Testing a change to Tessra itself means running `target/debug/tessra --no-daemon` against a scratch repository, never against this repository's daemon; inside a verifier, `TESSRA_SANDBOX` names this repository's root and the `tessra` under test refuses to act on it, so the CLI tests drive scratch repositories of their own.
 
 ## Releasing
 
 Releases are built by [dist](https://axodotdev.github.io/cargo-dist) from `dist-workspace.toml`. `.github/workflows/release.yml` is generated from that file and is not edited by hand. Pushing a tag `vX.Y.Z` that matches `version` under `[workspace.package]` in `Cargo.toml` builds `tessra` for macOS, Linux, and Windows on x86_64 and arm64, and publishes a GitHub release carrying the archives, the shell and PowerShell installers, checksums, and a source tarball. A version with a pre-release suffix, such as `v0.2.0-beta.1`, is published as a pre-release, which `releases/latest` and the install one-liners in the README skip.
 
 ```sh
-# bump version under [workspace.package] in Cargo.toml and commit, then
+# bump version under [workspace.package] in Cargo.toml, land it through the loop, export trunk to main, then
 git tag v0.1.0
 git push origin v0.1.0
 ```
