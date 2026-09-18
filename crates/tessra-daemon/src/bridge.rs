@@ -62,6 +62,43 @@ fn remember(repo: &Repo, rev_id: &ObjectId, commit: &str) -> Result<()> {
     Ok(())
 }
 
+fn pending_key(rev: &ObjectId) -> String {
+    format!("git:pending:{}", rev.to_hex())
+}
+
+/// The commit a refused export wrote for a revision, kept until the next
+/// export reuses it or writes the revision again.
+fn pending_commit_of(repo: &Repo, rev_id: &ObjectId) -> Result<Option<String>> {
+    Ok(repo
+        .store()
+        .meta(&pending_key(rev_id))?
+        .filter(|b| !b.is_empty())
+        .map(|b| String::from_utf8_lossy(&b).to_string()))
+}
+
+/// Whether `commit` is exactly what an export would write now: `tree` on
+/// `parent`, or on nothing for a root.
+fn commit_is(work: &Path, commit: &str, tree: &str, parent: Option<&str>) -> bool {
+    let tree_of = git_out(
+        work,
+        &[],
+        &["rev-parse", &format!("{commit}^{{tree}}")],
+        None,
+    )
+    .ok();
+    if tree_of.as_deref() != Some(tree) {
+        return false;
+    }
+    let parent_of = git_out(
+        work,
+        &[],
+        &["rev-parse", "--verify", "--quiet", &format!("{commit}^")],
+        None,
+    )
+    .ok();
+    parent_of.as_deref() == parent
+}
+
 pub fn revision_of_commit(repo: &Repo, commit: &str) -> Result<Option<ObjectId>> {
     Ok(repo
         .store()
@@ -406,16 +443,50 @@ pub fn export_git(
         None,
     )?);
     let chain = trunk_chain(repo)?;
-    // The newest revision that already is a commit.
+    let refname = format!("refs/heads/{branch}");
+    let branch_exists = git_out(
+        &work,
+        &[],
+        &["rev-parse", "--verify", "--quiet", &refname],
+        None,
+    )
+    .is_ok();
+    // The newest revision that already is a commit on the branch. A commit
+    // an earlier export wrote but never got onto the branch, because the
+    // checkout would not move, is not built on: it is written again, from
+    // what the rules say now.
     let mut parent: Option<String> = None;
     let mut start = 0;
     for (i, (id, r)) in chain.iter().enumerate() {
         if let Some(c) = commit_of(repo, id, r)? {
-            parent = Some(c);
-            start = i + 1;
+            let on_branch = if branch_exists {
+                git_out(
+                    &work,
+                    &[],
+                    &["merge-base", "--is-ancestor", &c, &refname],
+                    None,
+                )
+                .is_ok()
+            } else {
+                // A branch that does not exist yet starts from what other
+                // branches have; a commit on none of them is dangling.
+                git_out(
+                    &work,
+                    &[],
+                    &["for-each-ref", "--contains", &c, "refs/heads"],
+                    None,
+                )
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            };
+            if on_branch {
+                parent = Some(c);
+                start = i + 1;
+            }
         }
     }
     let mut created = Vec::new();
+    let mut mapped: Vec<(ObjectId, String)> = Vec::new();
     let mut ignored = 0usize;
     for (id, r) in chain.iter().skip(start) {
         let (tree_id, dropped) = write_git_tree(repo, &git_dir, &work, r)?;
@@ -448,23 +519,33 @@ pub fn export_git(
             ("GIT_COMMITTER_EMAIL", "tessra@tessra.local".into()),
             ("GIT_COMMITTER_DATE", format!("{secs} +0000")),
         ];
-        let mut args: Vec<String> = vec!["commit-tree".into(), tree_id.clone()];
-        if let Some(p) = &parent {
-            args.push("-p".into());
-            args.push(p.clone());
-        }
-        args.push("-F".into());
-        args.push("-".into());
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let commit = git_out(&work, &envs, &arg_refs, Some(message.as_bytes()))?;
-        remember(repo, id, &commit)?;
-        created.push(json!({ "commit": commit, "title": r.title, "author": author_name, "change": r.id.to_letters() }));
+        // A commit a refused export wrote for this revision is reused only
+        // when it is exactly what would be written now: the same tree on
+        // the same parent. Anything else is written again.
+        let pending = pending_commit_of(repo, id)?
+            .filter(|c| commit_is(&work, c, &tree_id, parent.as_deref()));
+        let commit = match pending {
+            Some(c) => c,
+            None => {
+                let mut args: Vec<String> = vec!["commit-tree".into(), tree_id.clone()];
+                if let Some(p) = &parent {
+                    args.push("-p".into());
+                    args.push(p.clone());
+                }
+                args.push("-F".into());
+                args.push("-".into());
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let commit = git_out(&work, &envs, &arg_refs, Some(message.as_bytes()))?;
+                created.push(json!({ "commit": commit, "title": r.title, "author": author_name, "change": r.id.to_letters() }));
+                commit
+            }
+        };
+        mapped.push((*id, commit.clone()));
         parent = Some(commit);
     }
     let Some(tip) = parent.clone() else {
         return Err(Error::verb("EXPORT", "trunk has no revisions to export"));
     };
-    let refname = format!("refs/heads/{branch}");
     let current =
         git_out(&work, &[], &["rev-parse", "--abbrev-ref", "HEAD"], None).unwrap_or_default();
     let checkout = if current != branch {
@@ -484,6 +565,11 @@ pub fn export_git(
             // only HEAD and the index are behind. Move those two and touch no
             // file; if the tree then differs from the index, put them back.
             if !checkout_holds(&work, &tip)? {
+                // The commits stay pending: the next export reuses each one
+                // that is still what it would write, and nothing else.
+                for (id, c) in &mapped {
+                    repo.store().set_meta(&pending_key(id), c.as_bytes())?;
+                }
                 return Err(Error::verb(
                     "EXPORT",
                     format!(
@@ -495,6 +581,11 @@ pub fn export_git(
         }
         "updated"
     };
+    // The branch has the commits now; only now are they the revisions'.
+    for (id, commit) in &mapped {
+        remember(repo, id, commit)?;
+        repo.store().set_meta(&pending_key(id), &[])?;
+    }
     let pushed = push.map(|remote| {
         git_out(
             &work,
@@ -1277,5 +1368,71 @@ mod tests {
             "the file stays in the checkout, untracked"
         );
         assert!(git_out(dir.path(), &[], &["diff", "--quiet"], None).is_ok());
+    }
+
+    /// An export the checkout refuses leaves nothing behind: the commit it
+    /// wrote is not the revision's, so the next export writes the revision
+    /// again, from what the rules say then, instead of building on a commit
+    /// the branch never had.
+    #[test]
+    fn a_refused_export_records_no_commit_and_the_next_one_starts_over() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let mut owner = repo.owner_actor();
+        std::fs::create_dir_all(dir.path().join("private")).unwrap();
+        std::fs::write(dir.path().join("private").join("notes.md"), "mine\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "two" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let rev_id = ObjectId::from_hex(out["result"]["revision"].as_str().unwrap()).unwrap();
+        let out = crate::verbs::call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let (head, _) = crate::verbs::trunk_head_of(&repo).unwrap();
+        let head_rev: Revision = repo.store().get(&head).unwrap();
+        // The checkout differs from the landed content, so the export
+        // cannot move it and is refused.
+        std::fs::write(dir.path().join("a.txt"), "one\nedited since\n").unwrap();
+        let err = export_git(&mut repo, "main", None, None).unwrap_err();
+        assert_eq!(err.code(), "EXPORT", "{err}");
+        assert!(commit_of(&repo, &head, &head_rev).unwrap().is_none());
+        assert!(
+            commit_of(&repo, &rev_id, &repo.store().get(&rev_id).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        // Meanwhile a rule arrives. The next export, with the checkout back
+        // in step, writes the revision from the rules as they are now.
+        std::fs::write(
+            dir.path().join(".git").join("info").join("exclude"),
+            "private/\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(1), "{out}");
+        assert_eq!(out["ignored"], json!(1), "{out}");
+        let tip = out["tip"].as_str().unwrap().to_string();
+        let listed = git_out(
+            dir.path(),
+            &[],
+            &["ls-tree", "-r", "--name-only", &tip],
+            None,
+        )
+        .unwrap();
+        assert!(
+            !listed.lines().any(|n| n.starts_with("private/")),
+            "{listed}"
+        );
+        assert_eq!(
+            commit_of(&repo, &head, &head_rev).unwrap().as_deref(),
+            Some(tip.as_str())
+        );
+        // A second export creates nothing.
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(0), "{out}");
     }
 }
