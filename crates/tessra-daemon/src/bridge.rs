@@ -5,7 +5,7 @@
 //! and commits lives in store metadata and in the bodies of imported
 //! revisions, so a round trip rewrites nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -154,9 +154,57 @@ fn trunk_chain(repo: &Repo) -> Result<Vec<(ObjectId, Revision)>> {
     Ok(out)
 }
 
+/// The paths among `paths` that git would ignore in `work`, by git's own
+/// rules: every `.gitignore` the tree carries, the repository's
+/// `info/exclude`, and the global excludes, with a path git already tracks
+/// exempt, as it is for git.
+fn git_ignored(work: &Path, git_dir: &Path, paths: &[&String]) -> Result<HashSet<String>> {
+    if paths.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut c = crate::quiet(Command::new("git"));
+    c.arg("-C")
+        .arg(plain(work))
+        .env("GIT_DIR", plain(git_dir))
+        .args(["check-ignore", "--stdin", "-z"]);
+    c.stdin(Stdio::piped());
+    c.stdout(Stdio::piped());
+    c.stderr(Stdio::piped());
+    let mut child = c
+        .spawn()
+        .map_err(|e| Error::Git(format!("running git: {e}")))?;
+    if let Some(mut si) = child.stdin.take() {
+        let mut input = Vec::new();
+        for p in paths {
+            input.extend_from_slice(p.as_bytes());
+            input.push(0);
+        }
+        si.write_all(&input)?;
+    }
+    let out = child.wait_with_output()?;
+    match out.status.code() {
+        // 0: some path is ignored; 1: none is.
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()),
+        _ => Err(Error::Git(format!(
+            "git check-ignore failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+    }
+}
+
 /// Write one revision's tree into the git object database and return the
-/// tree id, using a temporary index.
-fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> Result<String> {
+/// tree id, using a temporary index, and how many of the revision's files
+/// were left out because git would ignore them.
+fn write_git_tree(
+    repo: &Repo,
+    git_dir: &Path,
+    work: &Path,
+    rev: &Revision,
+) -> Result<(String, usize)> {
     let snap_id = rev
         .snapshots
         .get("")
@@ -175,6 +223,22 @@ fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> R
         ("GIT_DIR", plain(git_dir)),
     ];
     let envs_ref: Vec<(&str, String)> = envs.iter().map(|(k, v)| (*k, v.clone())).collect();
+    // What git would ignore never becomes part of a commit: a snapshot
+    // taken before the tracking rules knew an ignore file still exports
+    // clean.
+    let ignored = {
+        let candidates: Vec<&String> = flat
+            .iter()
+            .filter(|(_, l)| matches!(l.kind, EntryKind::File | EntryKind::Symlink))
+            .map(|(p, _)| p)
+            .collect();
+        git_ignored(&scratch, git_dir, &candidates)?
+    };
+    let dropped = ignored.len();
+    let flat: crate::tree::Flat = flat
+        .into_iter()
+        .filter(|(p, _)| !ignored.contains(p.as_str()))
+        .collect();
     // Blobs, in one call, paths relative to the scratch tree.
     let mut paths: Vec<&String> = flat
         .iter()
@@ -230,7 +294,7 @@ fn write_git_tree(repo: &Repo, git_dir: &Path, work: &Path, rev: &Revision) -> R
     let tree_id = git_out(&scratch, &envs_ref, &["write-tree"], None)?;
     let _ = std::fs::remove_file(&index);
     let _ = std::fs::remove_dir_all(&scratch);
-    Ok(tree_id)
+    Ok((tree_id, dropped))
 }
 
 /// Move HEAD and the index of a checkout to `tip` when its working tree
@@ -352,8 +416,10 @@ pub fn export_git(
         }
     }
     let mut created = Vec::new();
+    let mut ignored = 0usize;
     for (id, r) in chain.iter().skip(start) {
-        let tree_id = write_git_tree(repo, &git_dir, &work, r)?;
+        let (tree_id, dropped) = write_git_tree(repo, &git_dir, &work, r)?;
+        ignored += dropped;
         let author_name = repo
             .principal_name(&r.author)
             .unwrap_or_else(|| "tessra".into());
@@ -447,7 +513,7 @@ pub fn export_git(
         json!({ "workspace": "left alone", "why": format!("checkout {checkout}") })
     };
     Ok(json!({
-        "branch": branch, "tip": tip, "created": created.len(), "reused": start, "commits": created,
+        "branch": branch, "tip": tip, "created": created.len(), "reused": start, "commits": created, "ignored": ignored,
         "checkout": checkout, "pushed": pushed, "workspace": workspace,
     }))
 }
@@ -1162,5 +1228,54 @@ mod tests {
         assert_eq!(after, before, "HEAD did not move under a tree that differs");
         let e = std::fs::read_to_string(dir.path().join("e.txt")).unwrap();
         assert_eq!(e, "e, edited since\n", "and no file was touched");
+    }
+
+    /// What git would ignore never reaches a commit, even when a snapshot
+    /// taken before the ignore rule existed still carries the file: the
+    /// export asks git, and the checkout that already holds the exported
+    /// content follows all the same.
+    #[test]
+    fn an_export_leaves_out_what_git_ignores_and_says_how_many() {
+        let (dir, mut repo) = checkout_with_one_commit();
+        let mut owner = repo.owner_actor();
+        std::fs::create_dir_all(dir.path().join("private")).unwrap();
+        std::fs::write(dir.path().join("private").join("notes.md"), "mine\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        let out = crate::verbs::call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "two" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        // The rule arrives after the snapshot, as a rule from outside the
+        // tree does: the snapshot has the file, git would ignore it.
+        std::fs::write(
+            dir.path().join(".git").join("info").join("exclude"),
+            "private/\n",
+        )
+        .unwrap();
+        let out = crate::verbs::call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let out = export_git(&mut repo, "main", None, None).unwrap();
+        assert_eq!(out["created"], json!(1), "{out}");
+        assert_eq!(out["ignored"], json!(1), "{out}");
+        assert_eq!(out["checkout"], json!("updated"), "{out}");
+        let tip = out["tip"].as_str().unwrap().to_string();
+        let listed = git_out(
+            dir.path(),
+            &[],
+            &["ls-tree", "-r", "--name-only", &tip],
+            None,
+        )
+        .unwrap();
+        let names: Vec<&str> = listed.lines().collect();
+        assert!(names.contains(&"b.txt"), "{listed}");
+        assert!(!names.iter().any(|n| n.starts_with("private/")), "{listed}");
+        assert!(
+            dir.path().join("private").join("notes.md").exists(),
+            "the file stays in the checkout, untracked"
+        );
+        assert!(git_out(dir.path(), &[], &["diff", "--quiet"], None).is_ok());
     }
 }

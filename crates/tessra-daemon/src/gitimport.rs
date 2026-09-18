@@ -126,25 +126,37 @@ fn cat_blobs(root: &Path, oids: &[String]) -> Result<HashMap<String, Vec<u8>>> {
 }
 
 fn tracking_rules(root: &Path, vendored: &[String]) -> TrackingRules {
+    let git_dir = root.join(".git");
+    let git_dir = git_dir.is_dir().then_some(git_dir);
+    tracking_rules_for(
+        root,
+        git_dir.as_deref(),
+        global_excludes_file().as_deref(),
+        vendored,
+    )
+}
+
+/// The tracking rules for `tree`: what git would ignore there, so a file
+/// git never sees is never a file of the repository. From lowest to
+/// highest precedence, the last matching rule winning as in git: the global
+/// excludes file, `.git/info/exclude` when `git_dir` names a checkout, the
+/// root `.gitignore`, and every nested `.gitignore` scoped to its
+/// directory, parents before children. Then the vendored paths.
+pub fn tracking_rules_for(
+    tree: &Path,
+    git_dir: Option<&Path>,
+    global_excludes: Option<&Path>,
+    vendored: &[String],
+) -> TrackingRules {
     let mut rules = TrackingRules::default();
-    if let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) {
-        for line in text.lines() {
-            let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
-                continue;
-            }
-            let (pattern, class) = match l.strip_prefix('!') {
-                Some(p) => (p.to_string(), 0u8),
-                None => (l.to_string(), 1u8),
-            };
-            rules.rules.push(Rule {
-                pattern,
-                class,
-                generator: None,
-                media: None,
-            });
-        }
+    if let Some(global) = global_excludes {
+        push_ignore_file(&mut rules, global, "");
     }
+    if let Some(git) = git_dir {
+        push_ignore_file(&mut rules, &git.join("info").join("exclude"), "");
+    }
+    push_ignore_file(&mut rules, &tree.join(".gitignore"), "");
+    nested_ignore_files(&mut rules, tree, "");
     for v in vendored {
         rules.rules.push(Rule {
             pattern: v.clone(),
@@ -154,6 +166,139 @@ fn tracking_rules(root: &Path, vendored: &[String]) -> TrackingRules {
         });
     }
     rules
+}
+
+/// Git's global excludes file: `core.excludesFile` from the user's git
+/// configuration, else `$XDG_CONFIG_HOME/git/ignore`, else
+/// `~/.config/git/ignore`. Read without running git, so a snapshot never
+/// needs it installed.
+pub fn global_excludes_file() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.as_ref().map(|h| h.join(".config")));
+    let expand = |p: &str| -> PathBuf {
+        match (p.strip_prefix("~/"), &home) {
+            (Some(rest), Some(h)) => h.join(rest),
+            _ => PathBuf::from(p),
+        }
+    };
+    let mut configs: Vec<PathBuf> = Vec::new();
+    if let Some(x) = &xdg {
+        configs.push(x.join("git").join("config"));
+    }
+    if let Some(h) = &home {
+        configs.push(h.join(".gitconfig"));
+    }
+    for config in configs {
+        let Ok(text) = std::fs::read_to_string(&config) else {
+            continue;
+        };
+        let mut in_core = false;
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                in_core = l.eq_ignore_ascii_case("[core]");
+                continue;
+            }
+            if !in_core {
+                continue;
+            }
+            if let Some((k, v)) = l.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("excludesfile") {
+                    let v = v.trim().trim_matches('"');
+                    if !v.is_empty() {
+                        return Some(expand(v));
+                    }
+                }
+            }
+        }
+    }
+    xdg.map(|x| x.join("git").join("ignore"))
+}
+
+/// Add the patterns of one ignore file, read in `dir` (empty for the root).
+fn push_ignore_file(rules: &mut TrackingRules, file: &Path, dir: &str) {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return;
+    };
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let (p, class) = match l.strip_prefix('!') {
+            Some(p) => (p, 0u8),
+            None => (l, 1u8),
+        };
+        rules.rules.push(Rule {
+            pattern: scope_pattern(dir, p),
+            class,
+            generator: None,
+            media: None,
+        });
+    }
+}
+
+/// A gitignore pattern read in `dir`, as a pattern over paths from the
+/// root: one without a slash matches at any depth below `dir`, one with a
+/// slash is anchored to `dir`, and a trailing slash still means a directory.
+fn scope_pattern(dir: &str, p: &str) -> String {
+    if dir.is_empty() {
+        return p.to_string();
+    }
+    let dir_only = p.ends_with('/');
+    let body = p.trim_end_matches('/');
+    let scoped = if body.contains('/') {
+        format!("{dir}/{}", body.trim_start_matches('/'))
+    } else {
+        format!("{dir}/**/{body}")
+    };
+    if dir_only {
+        format!("{scoped}/")
+    } else {
+        scoped
+    }
+}
+
+/// Walk `tree` for nested `.gitignore` files. `.git`, `.tessra`, and any
+/// directory the rules so far ignore are never entered, so an ignored
+/// build tree costs nothing.
+fn nested_ignore_files(rules: &mut TrackingRules, tree: &Path, dir: &str) {
+    let here = if dir.is_empty() {
+        tree.to_path_buf()
+    } else {
+        tree.join(dir)
+    };
+    let Ok(entries) = std::fs::read_dir(here) else {
+        return;
+    };
+    let mut subdirs: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let name = e.file_name().to_string_lossy().to_string();
+        if !ft.is_dir() || name == ".git" || name == ".tessra" {
+            continue;
+        }
+        let rel = if dir.is_empty() {
+            name
+        } else {
+            format!("{dir}/{name}")
+        };
+        if crate::fs::ignored(rules, &rel, true) {
+            continue;
+        }
+        subdirs.push(rel);
+    }
+    subdirs.sort();
+    for rel in subdirs {
+        push_ignore_file(rules, &tree.join(&rel).join(".gitignore"), &rel);
+        nested_ignore_files(rules, tree, &rel);
+    }
 }
 
 /// Import HEAD only.
@@ -348,3 +493,56 @@ pub fn content_for_commit(
 
 #[allow(dead_code)]
 fn _unused(_: BTreeMap<String, String>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rules are what git would ignore: the global excludes, the
+    /// checkout's info/exclude, the root .gitignore, and every nested
+    /// .gitignore scoped to its directory, later files winning.
+    #[test]
+    fn tracking_rules_read_every_ignore_source_git_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        let git = dir.path().join("git");
+        std::fs::create_dir_all(git.join("info")).unwrap();
+        std::fs::create_dir_all(tree.join("notes").join("deep")).unwrap();
+        std::fs::create_dir_all(tree.join("a").join("b")).unwrap();
+        std::fs::create_dir_all(tree.join("target").join("debug")).unwrap();
+        std::fs::write(tree.join(".gitignore"), "/target\n*.pdb\n").unwrap();
+        std::fs::write(tree.join("notes").join(".gitignore"), "*\n").unwrap();
+        std::fs::write(
+            tree.join("a").join("b").join(".gitignore"),
+            "*.log\n!keep.log\nbuild/\n",
+        )
+        .unwrap();
+        // A .gitignore inside an ignored tree is never read.
+        std::fs::write(tree.join("target").join(".gitignore"), "!debug\n").unwrap();
+        std::fs::write(git.join("info").join("exclude"), "**/.claude/local.json\n").unwrap();
+        let global = dir.path().join("global-ignore");
+        std::fs::write(&global, "*.pem\n").unwrap();
+        let rules = tracking_rules_for(&tree, Some(&git), Some(&global), &[]);
+        let ignored = |p: &str, is_dir: bool| crate::fs::ignored(&rules, p, is_dir);
+        assert!(ignored("target", true), "root .gitignore");
+        assert!(ignored("x/y.pdb", false), "a basename pattern at any depth");
+        assert!(ignored("notes/secret.md", false), "a nested *");
+        assert!(ignored("notes/deep/x", false), "a nested * at any depth");
+        assert!(ignored("notes/deep", true));
+        assert!(ignored("a/b/run.log", false), "a nested basename pattern");
+        assert!(ignored("a/b/c/run.log", false));
+        assert!(!ignored("a/b/keep.log", false), "a nested negation");
+        assert!(!ignored("a/run.log", false), "scoped to its directory");
+        assert!(ignored("a/b/build", true), "a nested directory pattern");
+        assert!(!ignored("a/b/build", false), "which is directories only");
+        assert!(ignored(".claude/local.json", false), "info/exclude");
+        assert!(ignored("x/.claude/local.json", false));
+        assert!(ignored("key.pem", false), "the global excludes");
+        assert!(!ignored("src/lib.rs", false));
+        // Without a checkout, only the tree's own files count.
+        let rules = tracking_rules_for(&tree, None, None, &[]);
+        assert!(!crate::fs::ignored(&rules, "key.pem", false));
+        assert!(!crate::fs::ignored(&rules, ".claude/local.json", false));
+        assert!(crate::fs::ignored(&rules, "notes/secret.md", false));
+    }
+}

@@ -2452,12 +2452,44 @@ fn edit_rename(
     )
 }
 
+/// The tracking rules for a snapshot of `ws` now: what git would ignore in
+/// that directory, read afresh, and the vendored and generated rules the
+/// previous snapshot carried.
+fn rules_for(repo: &Repo, ws: &Workspace, stored: &TrackingRules) -> TrackingRules {
+    let git_dir = repo.root.join(".git");
+    let git_dir = git_dir.is_dir().then_some(git_dir);
+    let mut fresh = crate::gitimport::tracking_rules_for(
+        &ws_path(ws),
+        git_dir.as_deref(),
+        crate::gitimport::global_excludes_file().as_deref(),
+        &[],
+    );
+    fresh.eol = stored.eol.clone();
+    fresh.case = stored.case.clone();
+    fresh.portable_names = stored.portable_names;
+    fresh.artifact_threshold = stored.artifact_threshold;
+    fresh.rules.extend(
+        stored
+            .rules
+            .iter()
+            .filter(|r| r.class == 2 || r.generator.is_some() || r.media.is_some())
+            .cloned(),
+    );
+    fresh
+}
+
 fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> {
     let ws = require_workspace(repo, actor)?;
     refuse_if_held(repo, actor, &ws)?;
     let (cur_id, cur) = current_revision(repo, &ws)?;
     let (_, cur_snap) = root_snapshot(repo, &cur)?;
-    let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
+    let stored: TrackingRules = repo.store().get(&cur_snap.rules)?;
+    let rules = rules_for(repo, &ws, &stored);
+    let rules_id = if rules == stored {
+        cur_snap.rules
+    } else {
+        repo.store().put(&rules)?
+    };
     let base_flat: Flat = tree::flatten(repo.store(), &cur_snap.root)?;
     let mut out = fs::snapshot_dir(
         repo.store(),
@@ -2526,7 +2558,7 @@ fn snapshot(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     };
     let snap_id = repo.store().put(&Snapshot {
         root: out.tree,
-        rules: cur_snap.rules,
+        rules: rules_id,
         env,
         index: Some(index_id),
     })?;
@@ -4768,7 +4800,13 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
     } else {
         base_flat_of(repo, &ws)?
     };
-    let rules: TrackingRules = repo.store().get(&cur_snap.rules)?;
+    let stored: TrackingRules = repo.store().get(&cur_snap.rules)?;
+    let rules = rules_for(repo, &ws, &stored);
+    let rules_id = if rules == stored {
+        cur_snap.rules
+    } else {
+        repo.store().put(&rules)?
+    };
     let mut ranked: Vec<(u64, Json)> = Vec::new();
     let mut edits: Vec<Option<(String, Vec<u8>)>> = Vec::new();
     for (i, c) in candidates.iter().enumerate() {
@@ -4838,7 +4876,7 @@ fn try_verb(repo: &mut Repo, actor: &mut Actor, args: &Json) -> Result<Outcome> 
         let index_id = crate::semantic::put_index(repo.store(), out.tree, vec![cur_idx_id], nodes)?;
         let snap_id = repo.store().put(&Snapshot {
             root: out.tree,
-            rules: cur_snap.rules,
+            rules: rules_id,
             env: None,
             index: Some(index_id),
         })?;
@@ -7816,5 +7854,52 @@ mod tests {
         let out = call(&mut repo, &mut owner, "promote", &json!({ "to": "landed" }));
         assert_eq!(out["ok"], json!(true), "{out}");
         assert_eq!(out["result"]["stage"], json!("landed"), "{out}");
+    }
+
+    /// A snapshot reads the ignore rules afresh: a nested .gitignore added
+    /// after the repository was initialized keeps its directory out of the
+    /// tree, the way git would, and a later snapshot picks up a change to
+    /// the rules just the same.
+    #[test]
+    fn a_snapshot_honors_ignore_files_added_since_the_last_one() {
+        let (dir, mut repo, mut owner) = scratch();
+        std::fs::create_dir_all(dir.path().join("notes")).unwrap();
+        std::fs::write(dir.path().join("notes").join(".gitignore"), "*\n").unwrap();
+        std::fs::write(dir.path().join("notes").join("private.md"), "mine\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "one" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let files = |repo: &Repo, out: &Json| -> Vec<String> {
+            let rev_id = ObjectId::from_hex(out["result"]["revision"].as_str().unwrap()).unwrap();
+            let rev: Revision = repo.store().get(&rev_id).unwrap();
+            let (_, snap) = root_snapshot(repo, &rev).unwrap();
+            tree::flatten(repo.store(), &snap.root)
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let names = files(&repo, &out);
+        assert!(names.contains(&"lib.rs".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|p| p.starts_with("notes/")),
+            "what git ignores is not in the tree: {names:?}"
+        );
+        // Lifting the rule brings the directory in at the next snapshot.
+        std::fs::remove_file(dir.path().join("notes").join(".gitignore")).unwrap();
+        let out = call(
+            &mut repo,
+            &mut owner,
+            "snapshot",
+            &json!({ "title": "two" }),
+        );
+        assert_eq!(out["ok"], json!(true), "{out}");
+        let names = files(&repo, &out);
+        assert!(names.contains(&"notes/private.md".to_string()), "{names:?}");
     }
 }

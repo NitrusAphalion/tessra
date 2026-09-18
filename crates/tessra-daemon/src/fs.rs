@@ -23,7 +23,7 @@ pub struct SnapshotOutcome {
     pub files: usize,
 }
 
-fn ignored(rules: &TrackingRules, rel: &str, is_dir: bool) -> bool {
+pub(crate) fn ignored(rules: &TrackingRules, rel: &str, is_dir: bool) -> bool {
     let mut class = 0u8;
     for r in &rules.rules {
         let pat = r.pattern.trim_end_matches('/');
