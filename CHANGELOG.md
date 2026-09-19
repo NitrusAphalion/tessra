@@ -4,6 +4,10 @@ Notable changes to Tessra, newest first. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.0 - 2026-09-18
+
 ### Added
 
 - `tessra workspace --action adopt`: an agent session takes the checkout it was started in as its workspace, so the files its editor, tests, and other tools see are the ones it snapshots, and its landings are exported in its name. The agent holds the checkout across its sessions until `--action release`; while it does, the owner's own `edit`, `snapshot`, and `rewind` there are refused with `HELD`, and landing or exporting what the agent snapshotted is not. Adoption is refused while the checkout carries someone else's unlanded revision.
